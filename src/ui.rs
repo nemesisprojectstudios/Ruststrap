@@ -59,7 +59,8 @@ const BUTTON_SIZE: [f32; 2] = [150.0, 32.0];
 
 /// Uniform size of a settings tile and the gap between tiles.
 const TILE_SIZE: [f32; 2] = [320.0, 190.0];
-const TILE_GAP: f32 = 20.0;
+const TILE_GAP: f32 = 10.0;
+const TILE_INNER_GAP: f32 = 4.0;
 
 type TileBody<A> = Box<dyn Fn(&mut egui::Ui, &mut A)>;
 
@@ -1208,7 +1209,7 @@ impl RuststrapApp {
                             if ui
                                 .add(
                                     egui::DragValue::new(&mut g.gbs_edits.framerate_cap)
-                                        .min_size(egui::vec2(140.0, 0.0)),
+                                        .min_size(egui::vec2(84.0, 0.0)),
                                 )
                                 .changed()
                             {
@@ -1257,7 +1258,7 @@ impl RuststrapApp {
                                     egui::DragValue::new(&mut g.gbs_edits.mouse_sensitivity)
                                         .speed(0.1)
                                         .fixed_decimals(1)
-                                        .min_size(egui::vec2(140.0, 0.0)),
+                                        .min_size(egui::vec2(84.0, 0.0)),
                                 )
                                 .changed()
                             {
@@ -1704,6 +1705,7 @@ fn tile_grid<A>(ui: &mut egui::Ui, app: &mut A, tiles: Vec<(&'static str, TileBo
                         ui.group(|ui| {
                             ui.set_min_size(egui::vec2(width - 16.0, height - 16.0));
                             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                ui.spacing_mut().item_spacing.y = TILE_INNER_GAP;
                                 ui.strong(*title);
                                 egui::ScrollArea::vertical()
                                     .id_salt(format!("tile-{title}"))
