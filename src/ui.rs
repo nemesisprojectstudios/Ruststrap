@@ -81,6 +81,9 @@ pub fn run(ctx: Ctx) {
             cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             cc.egui_ctx.all_styles_mut(|style| {
                 style.spacing.button_padding = egui::vec2(10.0, 6.0);
+                // egui's built-in scroll fade paints a translucent band over
+                // scrolled tile content; tiles need clean clip edges instead.
+                style.spacing.scroll.fade.strength = 0.0;
             });
             Ok(Box::new(RuststrapApp::new(ctx)))
         }),
@@ -1080,17 +1083,18 @@ impl RuststrapApp {
 
     /// Apply the live edits to the map and persist them to
     /// ClientAppSettings.json (Windows) or Sober's config.json (Linux).
-    /// Persists every tab with unsaved edits (fast flags, Roblox settings, app settings).
+    /// Enforces the in-memory caches (fast flags, Roblox settings, Sober
+    /// settings, app settings) onto the on-disk files, overwriting anything
+    /// edited on disk since the app loaded them.
     fn save_all(&mut self) {
-        if self.flag_dirty {
-            self.save_flags();
-        }
-        if self.gbs_dirty {
+        self.save_flags();
+        // Roblox settings load lazily; until that page was opened the edits
+        // are template defaults that must not overwrite the real file.
+        if self.gbs_init {
             self.save_gbs();
         }
-        if self.settings_dirty {
-            self.save_settings_edits();
-        }
+        self.save_sober_toggles();
+        self.save_settings_edits();
     }
 
     /// Discards unsaved edits and reloads everything from disk.
@@ -1137,6 +1141,21 @@ impl RuststrapApp {
         drop(guard);
         self.settings_dirty = false;
         logger::info("Settings saved");
+    }
+
+    /// Writes the cached Sober toggle states into Sober's config.json.
+    fn save_sober_toggles(&mut self) {
+        if cfg!(windows) {
+            return;
+        }
+        let mut config = sober::load_config(paths::get());
+        for (_, key, on) in &self.sober_toggles {
+            config.insert(key.to_string(), Value::Bool(*on));
+        }
+        match sober::save_config(paths::get(), &config) {
+            Ok(()) => logger::info("Sober settings saved"),
+            Err(e) => logger::error(&format!("Failed to save Sober settings: {e}")),
+        }
     }
 
     fn save_flags(&mut self) {

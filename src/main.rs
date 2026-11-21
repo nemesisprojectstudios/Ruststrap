@@ -225,11 +225,12 @@ fn main() {
     };
 
     let paths = paths::init();
-    let log_path = paths.logs.join("Ruststrap.log");
-    logger::init(log_path);
+    logger::init(paths.logs.clone());
     info(&format!(
         "Log file: {}",
-        paths.logs.join("Ruststrap.log").display()
+        logger::file_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "unavailable".to_string())
     ));
 
     // a GUI panic would otherwise vanish with the window; record it

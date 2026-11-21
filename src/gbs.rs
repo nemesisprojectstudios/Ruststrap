@@ -26,6 +26,12 @@ pub struct Gbs {
     pub raw: String,
 }
 
+/// Sober writes attributes after `class` (e.g. `referent="RBX0"`), so match
+/// on the class name instead of the full opening tag.
+fn is_user_game_settings(raw: &str) -> bool {
+    raw.contains("class=\"UserGameSettings\"")
+}
+
 impl Gbs {
     /// Loads the file, or falls back to a fresh template that Roblox will
     /// happily extend (absent properties simply get their default).
@@ -33,7 +39,7 @@ impl Gbs {
         let path = file_location(paths);
         match std::fs::read_to_string(&path) {
             Ok(raw) => {
-                if raw.contains("<Item class=\"UserGameSettings\">") {
+                if is_user_game_settings(&raw) {
                     return Gbs { raw };
                 }
                 logger::error(&format!(
@@ -185,7 +191,7 @@ impl Gbs {
     pub fn import(path: &Path) -> Result<(), String> {
         let contents =
             std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if !contents.contains("<Item class=\"UserGameSettings\">") {
+        if !is_user_game_settings(&contents) {
             return Err(format!(
                 "{} is not a UserGameSettings document",
                 path.display()
@@ -296,4 +302,16 @@ mod tests {
             Some("0")
         );
     }
+}
+
+#[test]
+fn loads_documents_with_extra_item_attributes() {
+    let g = Gbs {
+        raw: "<roblox version=\"4\"><Item class=\"UserGameSettings\" referent=\"RBX0\"><Properties></Properties></Item></roblox>".to_string(),
+    };
+    assert_eq!(g.get("bool", "Fullscreen"), None);
+    assert!(
+        crate::gbs::is_user_game_settings(&g.raw),
+        "documents with attributes after class= must count as UserGameSettings"
+    );
 }

@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,12 +13,129 @@ use std::sync::OnceLock;
 
 static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static RING: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 const RING_CAP: usize = 400;
 
-pub fn init(path: PathBuf) {
-    let file = OpenOptions::new().create(true).append(true).open(path).ok();
+/// Sessions older than this get a fresh log file instead of appending.
+const ROTATE_AFTER: Duration = Duration::from_secs(6 * 3600);
+/// Log files older than this are deleted at startup.
+const PRUNE_AFTER: Duration = Duration::from_secs(7 * 86400);
+/// `latest.log` points at the file the current session writes to.
+const LATEST_NAME: &str = "latest.log";
+
+/// Rotates, prunes, opens the log file, and points `latest.log` at it.
+pub fn init(dir: PathBuf) {
+    let _ = std::fs::create_dir_all(&dir);
+    let now = SystemTime::now();
+    prune_old_logs(&dir, now);
+    let path = rotate_target(&dir, now);
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok();
     let _ = LOG_FILE.set(Mutex::new(file));
     let _ = RING.set(Mutex::new(VecDeque::with_capacity(RING_CAP)));
+    let _ = LOG_PATH.set(path.clone());
+    write_latest_link(&dir, &path);
+}
+
+/// The file the current session logs into, if any.
+pub fn file_path() -> Option<PathBuf> {
+    LOG_PATH.get().cloned()
+}
+
+/// The newest existing session log if it was written to within
+/// `ROTATE_AFTER`, otherwise a fresh timestamped file name.
+fn rotate_target(dir: &Path, now: SystemTime) -> PathBuf {
+    if let Some((newest, mtime)) = newest_log(dir) {
+        if now
+            .duration_since(mtime)
+            .map(|age| age <= ROTATE_AFTER)
+            .unwrap_or(false)
+        {
+            return newest;
+        }
+    }
+    let secs = now
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    let (y, mo, d, h, mi, s) = civil_from_secs(secs);
+    let mut path = dir.join(format!(
+        "Ruststrap-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}.log"
+    ));
+    let mut suffix = 1u32;
+    while path.exists() {
+        path = dir.join(format!(
+            "Ruststrap-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}-{suffix}.log"
+        ));
+        suffix += 1;
+    }
+    path
+}
+
+/// Newest session log (legacy `Ruststrap.log` or `Ruststrap-*.log`) by mtime.
+fn newest_log(dir: &Path) -> Option<(PathBuf, SystemTime)> {
+    let mut best: Option<(PathBuf, SystemTime)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_log =
+            name == "Ruststrap.log" || (name.starts_with("Ruststrap-") && name.ends_with(".log"));
+        if !is_log || !entry.path().is_file() {
+            continue;
+        }
+        let mtime = entry.metadata().and_then(|m| m.modified()).ok()?;
+        if best.as_ref().is_none_or(|(_, t)| mtime > *t) {
+            best = Some((entry.path(), mtime));
+        }
+    }
+    best
+}
+
+/// Deletes session logs (and a stale on-disk `latest.log`) older than `PRUNE_AFTER`.
+fn prune_old_logs(dir: &Path, now: SystemTime) {
+    let cutoff = now.checked_sub(PRUNE_AFTER);
+    let Some(cutoff) = cutoff else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_log = name == LATEST_NAME
+            || name == "Ruststrap.log"
+            || (name.starts_with("Ruststrap-") && name.ends_with(".log"));
+        if !is_log {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime < cutoff)
+            .unwrap_or(false);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Points `latest.log` at the active log (symlink on Unix, best-effort copy on
+/// Windows where symlinks need elevated or developer-mode rights).
+fn write_latest_link(dir: &Path, path: &Path) {
+    let latest = dir.join(LATEST_NAME);
+    let _ = std::fs::remove_file(&latest);
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(&path, &latest).is_err() {
+            let _ = std::fs::copy(&path, &latest);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_file(&path, &latest).is_err() {
+            let _ = std::fs::copy(&path, &latest);
+        }
+    }
 }
 
 pub fn info(msg: &str) {
@@ -101,5 +218,74 @@ mod tests {
         assert_eq!(civil_from_secs(0), (1970, 1, 1, 0, 0, 0));
         assert_eq!(civil_from_secs(951782400), (2000, 2, 29, 0, 0, 0));
         assert_eq!(civil_from_secs(4102444799), (2099, 12, 31, 23, 59, 59));
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ruststrap-logger-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rotation_reuses_recent_log_and_creates_timestamped_file_when_stale() {
+        let dir = temp_dir("rotate");
+        let recent = dir.join("Ruststrap-20260101-000000.log");
+        std::fs::write(&recent, "x").unwrap();
+        let mtime = recent.metadata().unwrap().modified().unwrap();
+        assert_eq!(rotate_target(&dir, mtime), recent);
+
+        let stale_now = mtime + ROTATE_AFTER + Duration::from_secs(1);
+        let fresh = rotate_target(&dir, stale_now);
+        assert_ne!(fresh, recent);
+        assert!(fresh.to_string_lossy().contains("Ruststrap-"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn prune_respects_the_age_limit_both_ways() {
+        let dir = temp_dir("prune");
+        let fresh = dir.join("Ruststrap-20990101-000000.log");
+        let untracked = dir.join("keep-me.txt");
+        std::fs::write(&fresh, "log").unwrap();
+        std::fs::write(&untracked, "keep").unwrap();
+
+        let now = SystemTime::now();
+        prune_old_logs(&dir, now);
+        assert!(fresh.exists(), "nothing may be pruned before the age limit");
+
+        let far_future = now + PRUNE_AFTER + Duration::from_secs(2);
+        prune_old_logs(&dir, far_future);
+        assert!(
+            !fresh.exists(),
+            "session logs past the age limit are pruned"
+        );
+        assert!(
+            untracked.exists(),
+            "files outside the log pattern must survive"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn init_writes_latest_link_at_the_active_file() {
+        let dir = temp_dir("latest");
+        logger_init_for_test(dir.clone());
+        let active = file_path().unwrap();
+        assert!(active.is_file());
+        let latest = dir.join(LATEST_NAME);
+        let link_target = std::fs::read_link(&latest);
+        match link_target {
+            Ok(target) => assert_eq!(target, active, "unix symlink must point at the active log"),
+            Err(_) => {
+                assert!(latest.is_file(), "copy fallback must produce latest.log");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn logger_init_for_test(dir: PathBuf) {
+        init(dir);
     }
 }
