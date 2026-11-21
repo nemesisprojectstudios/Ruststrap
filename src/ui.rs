@@ -39,6 +39,7 @@ enum WorkerMsg {
         studio: Option<String>,
     },
     SoberInstalled(bool),
+    AppVersion(Option<String>),
     FilePicked(FilePickTarget, Option<std::path::PathBuf>),
 }
 
@@ -59,6 +60,7 @@ type SharedCtx = Arc<Mutex<Ctx>>;
 
 /// Every button uses this size so the layout stays uniform.
 const BUTTON_SIZE: [f32; 2] = [150.0, 32.0];
+const ACTION_SIZE: [f32; 2] = [142.0, 32.0];
 
 /// Uniform size of a settings tile and the gap between tiles.
 const TILE_SIZE: [f32; 2] = [320.0, 190.0];
@@ -131,6 +133,9 @@ struct RuststrapApp {
     version_pin: String,
     latest_player: Option<String>,
     latest_studio: Option<String>,
+    app_latest: Option<String>,
+    renaming: Option<String>,
+    rename_buf: String,
     sober_installed: bool,
     sober_toggles: Vec<(&'static str, &'static str, bool)>,
 }
@@ -317,6 +322,9 @@ impl RuststrapApp {
             version_pin: String::new(),
             latest_player: None,
             latest_studio: None,
+            app_latest: None,
+            renaming: None,
+            rename_buf: String::new(),
             sober_installed: !cfg!(windows) && sober::is_installed(),
             sober_toggles,
         }
@@ -510,6 +518,28 @@ impl RuststrapApp {
         });
     }
 
+    /// Compares this build's version against the latest GitHub release tag.
+    fn check_app_version_job(&mut self) {
+        self.spawn_job("Checking Ruststrap version", move |_, tx| {
+            let http = Http::new();
+            let latest = http
+                .get_json_checked::<serde_json::Value>(
+                    "https://api.github.com/repos/nemesisprojectstudios/Ruststrap/releases/latest",
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .and_then(|v| {
+                    v.get("tag_name")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t.trim_start_matches('v').to_string())
+                });
+            if latest.is_none() {
+                logger::warn("Could not fetch the latest Ruststrap release");
+            }
+            let _ = tx.send(WorkerMsg::AppVersion(latest));
+        });
+    }
+
     fn check_versions_job(&mut self) {
         self.spawn_job("Checking versions", move |shared, tx| {
             let http = Http::new();
@@ -556,6 +586,7 @@ impl eframe::App for RuststrapApp {
                     self.latest_studio = studio;
                 }
                 WorkerMsg::SoberInstalled(installed) => self.sober_installed = installed,
+                WorkerMsg::AppVersion(latest) => self.app_latest = latest,
                 WorkerMsg::FilePicked(target, file) => {
                     self.picking = None;
                     self.handle_file_pick(target, file);
@@ -599,7 +630,7 @@ impl eframe::App for RuststrapApp {
                     if ui
                         .add_enabled(
                             !busy,
-                            egui::Button::new("Save and Launch").min_size(BUTTON_SIZE.into()),
+                            egui::Button::new("Save and Launch").min_size(ACTION_SIZE.into()),
                         )
                         .clicked()
                     {
@@ -609,7 +640,7 @@ impl eframe::App for RuststrapApp {
                     if ui
                         .add_enabled(
                             dirty && !busy,
-                            egui::Button::new("Save all").min_size(BUTTON_SIZE.into()),
+                            egui::Button::new("Save all").min_size(ACTION_SIZE.into()),
                         )
                         .clicked()
                     {
@@ -618,11 +649,17 @@ impl eframe::App for RuststrapApp {
                     if ui
                         .add_enabled(
                             dirty && !busy,
-                            egui::Button::new("Revert changes").min_size(BUTTON_SIZE.into()),
+                            egui::Button::new("Revert changes").min_size(ACTION_SIZE.into()),
                         )
                         .clicked()
                     {
                         self.revert_changes();
+                    }
+                    if ui
+                        .add_sized(ACTION_SIZE, egui::Button::new("Exit"))
+                        .clicked()
+                    {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
             });
@@ -732,11 +769,34 @@ impl RuststrapApp {
                 }
             });
 
-        if ui
-            .add_sized(BUTTON_SIZE, egui::Button::new("Check for updates"))
-            .clicked()
+        if cfg!(windows)
+            && ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Check for updates"))
+                .clicked()
         {
             self.check_versions_job();
+        }
+        if ui
+            .add_sized(BUTTON_SIZE, egui::Button::new("Check version"))
+            .clicked()
+        {
+            self.check_app_version_job();
+        }
+        if let Some(latest) = &self.app_latest {
+            let current = env!("CARGO_PKG_VERSION");
+            if latest.as_str() != current {
+                ui.label(format!(
+                    "Ruststrap update available: v{latest} (installed v{current})"
+                ));
+                if ui
+                    .add_sized(BUTTON_SIZE, egui::Button::new("Open download page"))
+                    .clicked()
+                {
+                    open_url("https://github.com/nemesisprojectstudios/Ruststrap/releases/latest");
+                }
+            } else {
+                ui.weak("Ruststrap is up to date");
+            }
         }
 
         if !cfg!(windows) {
@@ -890,12 +950,13 @@ impl RuststrapApp {
             {
                 self.save_flags();
             }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.flag_search)
-                    .hint_text("Search")
-                    .desired_width(160.0),
-            );
         });
+
+        ui.add(
+            egui::TextEdit::singleline(&mut self.flag_search)
+                .hint_text("Search")
+                .desired_width(160.0),
+        );
 
         let query = self.flag_search.trim().to_lowercase();
         let rows: Vec<(String, String)> = self
@@ -923,27 +984,52 @@ impl RuststrapApp {
         } else {
             egui::Grid::new("fflags")
                 .striped(true)
-                .num_columns(3)
+                .num_columns(2)
                 .min_col_width(160.0)
                 .show(ui, |ui| {
                     for (key, value) in rows {
-                        let mut selected = self.flag_selected.contains(&key);
-                        if ui.checkbox(&mut selected, "").changed() {
-                            if selected {
-                                self.flag_selected.insert(key.clone());
-                            } else {
-                                self.flag_selected.remove(&key);
+                        let selected = self.flag_selected.contains(&key);
+                        if self.renaming.as_deref() == Some(key.as_str()) {
+                            let edit = ui.add(
+                                egui::TextEdit::singleline(&mut self.rename_buf)
+                                    .desired_width(160.0),
+                            );
+                            if edit.lost_focus() {
+                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                    self.renaming = None;
+                                    self.rename_buf.clear();
+                                } else {
+                                    self.finish_rename();
+                                }
+                            }
+                        } else {
+                            let resp = ui.selectable_label(selected, &key);
+                            if resp.double_clicked() {
+                                self.renaming = Some(key.clone());
+                                self.rename_buf = key.clone();
+                            } else if resp.clicked() {
+                                if ui.input(|i| i.modifiers.ctrl) {
+                                    if selected {
+                                        self.flag_selected.remove(&key);
+                                    } else {
+                                        self.flag_selected.insert(key.clone());
+                                    }
+                                } else {
+                                    self.flag_selected.clear();
+                                    self.flag_selected.insert(key.clone());
+                                }
                             }
                         }
-                        ui.monospace(&key);
-                        let mut buf = value;
-                        if ui
-                            .add(egui::TextEdit::singleline(&mut buf).desired_width(240.0))
-                            .changed()
-                        {
-                            self.flag_edits.insert(key.clone(), buf);
-                            self.flag_dirty = true;
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let mut buf = value;
+                            let edited = ui
+                                .add(egui::TextEdit::singleline(&mut buf).desired_width(240.0))
+                                .changed();
+                            if edited {
+                                self.flag_edits.insert(key.clone(), buf);
+                                self.flag_dirty = true;
+                            }
+                        });
                         ui.end_row();
                     }
                 });
@@ -1144,6 +1230,42 @@ impl RuststrapApp {
     }
 
     /// Writes the cached Sober toggle states into Sober's config.json.
+    /// Applies the double-click rename of a flag entry.
+    fn finish_rename(&mut self) {
+        let Some(old) = self.renaming.take() else {
+            return;
+        };
+        let new_key = self.rename_buf.trim().to_string();
+        self.rename_buf.clear();
+        if new_key.is_empty() || new_key == old {
+            return;
+        }
+        if self.fflags.contains_key(&new_key) {
+            logger::error(&format!("Flag {new_key} already exists; rename cancelled"));
+            return;
+        }
+        let has_edit = self.flag_edits.contains_key(&old);
+        let value =
+            self.flag_edits
+                .get(&old)
+                .cloned()
+                .unwrap_or_else(|| match self.fflags.get(&old) {
+                    Some(Value::String(inner)) => inner.clone(),
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                });
+        if !has_edit && self.fflags.remove(&old).is_none() {
+            logger::error(&format!("Flag {old} not found; rename cancelled"));
+            return;
+        }
+        self.flag_edits.remove(&old);
+        self.flag_selected.remove(&old);
+        self.flag_selected.insert(new_key.clone());
+        self.fflags.insert(new_key, Value::String(value));
+        self.flag_dirty = true;
+        logger::info("Flag renamed");
+    }
+
     fn save_sober_toggles(&mut self) {
         if cfg!(windows) {
             return;
@@ -1920,6 +2042,23 @@ fn tile_grid<A>(ui: &mut egui::Ui, app: &mut A, tiles: Vec<(&'static str, TileBo
             });
         }
     });
+}
+
+fn open_url(url: &str) {
+    let result = if cfg!(windows) {
+        std::process::Command::new("explorer")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+    } else {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+    };
+    if let Err(e) = result {
+        logger::error(&format!("Cannot open {url}: {e}"));
+    }
 }
 
 fn open_folder(path: std::path::PathBuf) {
