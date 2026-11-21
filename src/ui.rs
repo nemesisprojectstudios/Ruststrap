@@ -40,6 +40,10 @@ enum WorkerMsg {
     },
     SoberInstalled(bool),
     AppVersion(Option<String>),
+    UserChannels {
+        player: Option<String>,
+        studio: Option<String>,
+    },
     FilePicked(FilePickTarget, Option<std::path::PathBuf>),
 }
 
@@ -133,6 +137,8 @@ struct RuststrapApp {
     version_pin: String,
     latest_player: Option<String>,
     latest_studio: Option<String>,
+    user_channel_player: Option<String>,
+    user_channel_studio: Option<String>,
     app_latest: Option<String>,
     renaming: Option<String>,
     rename_buf: String,
@@ -158,10 +164,14 @@ const SOBER_TOGGLES: [(&str, &str); 11] = [
     ("Close on leave", "close_on_leave"),
 ];
 
+/// Roblox's public deployment channels (Froststrap's channel picker list).
+const KNOWN_CHANNELS: [&str; 5] = ["production", "zlive", "znext", "zcanary", "zflag"];
+
 #[derive(Default)]
 struct SettingsEdits {
     player_channel: String,
     studio_channel: String,
+    channel_change_mode: String,
     cleaner_days: u32,
     max_threads: usize,
     update_roblox: bool,
@@ -281,6 +291,7 @@ impl RuststrapApp {
         let settings_edits = SettingsEdits {
             player_channel: ctx.settings.player_channel.clone(),
             studio_channel: ctx.settings.studio_channel.clone(),
+            channel_change_mode: ctx.settings.channel_change_mode.clone(),
             cleaner_days: ctx.settings.cleaner_days,
             max_threads: ctx.settings.max_thread_download,
             update_roblox: ctx.settings.update_roblox,
@@ -322,6 +333,8 @@ impl RuststrapApp {
             version_pin: String::new(),
             latest_player: None,
             latest_studio: None,
+            user_channel_player: None,
+            user_channel_studio: None,
             app_latest: None,
             renaming: None,
             rename_buf: String::new(),
@@ -575,6 +588,31 @@ impl RuststrapApp {
             let _ = tx.send(WorkerMsg::Versions { player, studio });
         });
     }
+
+    /// Asks Roblox which channel the user account is enrolled in per binary
+    /// type; on Linux the player is Sober's, so only Studio is probed there.
+    fn check_user_channels_job(&mut self) {
+        self.spawn_job("Checking user channels", move |shared, tx| {
+            let http = Http::new();
+            let guard = match shared.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    logger::error(&format!("state lock unavailable: {e}"));
+                    return;
+                }
+            };
+            let decode = |is_studio: bool| {
+                crate::deployment::get_user_channel(
+                    &http,
+                    &guard.settings,
+                    crate::packages::binary_type(is_studio),
+                )
+            };
+            let player = if cfg!(windows) { decode(false) } else { None };
+            let studio = decode(true);
+            let _ = tx.send(WorkerMsg::UserChannels { player, studio });
+        });
+    }
 }
 
 impl eframe::App for RuststrapApp {
@@ -587,6 +625,10 @@ impl eframe::App for RuststrapApp {
                 }
                 WorkerMsg::SoberInstalled(installed) => self.sober_installed = installed,
                 WorkerMsg::AppVersion(latest) => self.app_latest = latest,
+                WorkerMsg::UserChannels { player, studio } => {
+                    self.user_channel_player = player;
+                    self.user_channel_studio = studio;
+                }
                 WorkerMsg::FilePicked(target, file) => {
                     self.picking = None;
                     self.handle_file_pick(target, file);
@@ -982,57 +1024,99 @@ impl RuststrapApp {
                 "No flags match the search."
             });
         } else {
-            egui::Grid::new("fflags")
-                .striped(true)
-                .num_columns(2)
-                .min_col_width(160.0)
-                .show(ui, |ui| {
-                    for (key, value) in rows {
-                        let selected = self.flag_selected.contains(&key);
-                        if self.renaming.as_deref() == Some(key.as_str()) {
-                            let edit = ui.add(
-                                egui::TextEdit::singleline(&mut self.rename_buf)
-                                    .desired_width(160.0),
-                            );
-                            if edit.lost_focus() {
-                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                    self.renaming = None;
-                                    self.rename_buf.clear();
-                                } else {
-                                    self.finish_rename();
-                                }
+            let value_gap = 16.0;
+            let value_w = 240.0;
+            let row_h = ui.spacing().interact_size.y.max(24.0) + 6.0;
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let pointer = ui.input(|i| i.pointer.interact_pos());
+            let mut click_on_row = false;
+            for (index, (key, raw_value)) in rows.into_iter().enumerate() {
+                let full_width = ui.available_width();
+                let (row_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(full_width, row_h), egui::Sense::hover());
+                let value_rect = egui::Rect::from_min_max(
+                    egui::pos2(row_rect.right() - value_gap - value_w, row_rect.top()),
+                    egui::pos2(row_rect.right() - value_gap, row_rect.bottom()),
+                );
+                let name_rect = egui::Rect::from_min_max(
+                    egui::pos2(row_rect.left(), row_rect.top()),
+                    egui::pos2(value_rect.left() - 8.0, row_rect.bottom()),
+                );
+                let painter = ui.painter();
+                let selected = self.flag_selected.contains(&key);
+                if selected {
+                    painter.rect_filled(row_rect, 0.0, ui.visuals().selection.bg_fill);
+                } else if index % 2 == 1 {
+                    painter.rect_filled(row_rect, 0.0, ui.visuals().faint_bg_color);
+                }
+                if pointer.is_some_and(|p| row_rect.contains(p)) {
+                    click_on_row = true;
+                }
+
+                if self.renaming.as_deref() == Some(key.as_str()) {
+                    let edit = ui.put(
+                        name_rect.shrink2(egui::vec2(0.0, 2.0)),
+                        egui::TextEdit::singleline(&mut self.rename_buf)
+                            .desired_width(name_rect.width()),
+                    );
+                    if edit.lost_focus() {
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.renaming = None;
+                            self.rename_buf.clear();
+                        } else {
+                            self.finish_rename();
+                        }
+                    }
+                } else {
+                    let click = ui.interact(
+                        name_rect,
+                        ui.scope_id().with(("fflag-row", &key)),
+                        egui::Sense::click(),
+                    );
+                    painter.text(
+                        name_rect.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        &key,
+                        font.clone(),
+                        if selected {
+                            ui.visuals().strong_text_color()
+                        } else {
+                            ui.visuals().text_color()
+                        },
+                    );
+                    if click.double_clicked() {
+                        self.renaming = Some(key.clone());
+                        self.rename_buf = key.clone();
+                    } else if click.clicked() {
+                        if ui.input(|i| i.modifiers.ctrl) {
+                            if selected {
+                                self.flag_selected.remove(&key);
+                            } else {
+                                self.flag_selected.insert(key.clone());
                             }
                         } else {
-                            let resp = ui.selectable_label(selected, &key);
-                            if resp.double_clicked() {
-                                self.renaming = Some(key.clone());
-                                self.rename_buf = key.clone();
-                            } else if resp.clicked() {
-                                if ui.input(|i| i.modifiers.ctrl) {
-                                    if selected {
-                                        self.flag_selected.remove(&key);
-                                    } else {
-                                        self.flag_selected.insert(key.clone());
-                                    }
-                                } else {
-                                    self.flag_selected.clear();
-                                    self.flag_selected.insert(key.clone());
-                                }
-                            }
+                            self.flag_selected.clear();
+                            self.flag_selected.insert(key.clone());
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let mut buf = value;
-                            let edited = ui
-                                .add(egui::TextEdit::singleline(&mut buf).desired_width(240.0))
-                                .changed();
-                            if edited {
-                                self.flag_edits.insert(key.clone(), buf);
-                                self.flag_dirty = true;
-                            }
-                        });
-                        ui.end_row();
                     }
-                });
+                }
+
+                let mut buf = self.flag_edits.get(&key).cloned().unwrap_or(raw_value);
+                let edited = ui
+                    .put(
+                        value_rect,
+                        egui::TextEdit::singleline(&mut buf).desired_width(value_w),
+                    )
+                    .changed();
+                if edited {
+                    self.flag_edits.insert(key.clone(), buf);
+                    self.flag_dirty = true;
+                }
+            }
+
+            if ui.input(|i| i.pointer.any_click()) && !click_on_row {
+                self.flag_selected.clear();
+            }
         }
 
         if self.add_dialog_open {
@@ -1194,6 +1278,7 @@ impl RuststrapApp {
         self.settings_edits = SettingsEdits {
             player_channel: guard.settings.player_channel.clone(),
             studio_channel: guard.settings.studio_channel.clone(),
+            channel_change_mode: guard.settings.channel_change_mode.clone(),
             cleaner_days: guard.settings.cleaner_days,
             max_threads: guard.settings.max_thread_download,
             update_roblox: guard.settings.update_roblox,
@@ -1209,22 +1294,42 @@ impl RuststrapApp {
             logger::error("State file lock unavailable; settings not saved");
             return;
         };
-        guard.settings.player_channel = self
+        let player_channel = self
             .settings_edits
             .player_channel
             .trim()
             .to_ascii_lowercase();
-        guard.settings.studio_channel = self
+        let studio_channel = self
             .settings_edits
             .studio_channel
             .trim()
             .to_ascii_lowercase();
+        guard.settings.player_channel = player_channel.clone();
+        guard.settings.studio_channel = studio_channel;
+        let mode = match self
+            .settings_edits
+            .channel_change_mode
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "prompt" => "prompt",
+            "ignore" => "ignore",
+            _ => "automatic",
+        };
+        self.settings_edits.channel_change_mode = mode.to_string();
+        guard.settings.channel_change_mode = mode.to_string();
         guard.settings.update_roblox = self.settings_edits.update_roblox;
         guard.settings.background_app = self.settings_edits.background_app;
         guard.settings.max_thread_download = self.settings_edits.max_threads;
         guard.settings.cleaner_days = self.settings_edits.cleaner_days;
         guard.save_settings();
         drop(guard);
+        #[cfg(not(windows))]
+        {
+            if let Err(e) = Self::set_sober_channel(&player_channel) {
+                logger::error(&format!("Failed to sync Sober channel: {e}"));
+            }
+        }
         self.settings_dirty = false;
         logger::info("Settings saved");
     }
@@ -1278,6 +1383,15 @@ impl RuststrapApp {
             Ok(()) => logger::info("Sober settings saved"),
             Err(e) => logger::error(&format!("Failed to save Sober settings: {e}")),
         }
+    }
+
+    /// Sober reads the player channel from its own config.json; keep it in
+    /// sync with the saved player channel.
+    #[cfg(not(windows))]
+    fn set_sober_channel(channel: &str) -> Result<(), String> {
+        let mut config = sober::load_config(paths::get());
+        config.insert("channel".to_string(), Value::String(channel.to_string()));
+        sober::save_config(paths::get(), &config)
     }
 
     fn save_flags(&mut self) {
@@ -1739,22 +1853,63 @@ impl RuststrapApp {
                     Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
                         ui.horizontal(|ui| {
                             ui.label("Player");
-                            g.settings_dirty |= ui
-                                .text_edit_singleline(&mut g.settings_edits.player_channel)
-                                .changed();
+                            g.settings_dirty |= channel_combo(
+                                ui,
+                                "player-channel",
+                                &mut g.settings_edits.player_channel,
+                            );
                         });
                         ui.horizontal(|ui| {
                             ui.label("Studio");
-                            g.settings_dirty |= ui
-                                .text_edit_singleline(&mut g.settings_edits.studio_channel)
-                                .changed();
+                            g.settings_dirty |= channel_combo(
+                                ui,
+                                "studio-channel",
+                                &mut g.settings_edits.studio_channel,
+                            );
                         });
+                        if ui.button("Check Roblox channels").clicked() {
+                            g.check_user_channels_job();
+                        }
+                        match (&g.user_channel_player, &g.user_channel_studio) {
+                            (Some(player), Some(studio)) => {
+                                ui.label(format!(
+                                    "Your account uses: player '{player}', studio '{studio}'"
+                                ));
+                            }
+                            (None, Some(studio)) => {
+                                ui.label(format!("Your account uses: studio '{studio}'"));
+                            }
+                            _ => {}
+                        }
                         ui.label(format!("Default: {DEFAULT_CHANNEL}"));
                     }),
                 ),
                 (
                     "Behavior",
                     Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        ui.horizontal(|ui| {
+                            ui.label("Channel switch requests");
+                            let mode = g.settings_edits.channel_change_mode.clone();
+                            let changed = egui::ComboBox::from_id_salt("channel-change-mode")
+                                .selected_text(mode)
+                                .width(120.0)
+                                .show_ui(ui, |ui| {
+                                    for (text, value) in [
+                                        ("Automatic", "automatic"),
+                                        ("Prompt", "prompt"),
+                                        ("Ignore", "ignore"),
+                                    ] {
+                                        ui.selectable_value(
+                                            &mut g.settings_edits.channel_change_mode,
+                                            value.to_string(),
+                                            text,
+                                        );
+                                    }
+                                })
+                                .response
+                                .changed();
+                            g.settings_dirty |= changed;
+                        });
                         g.settings_dirty |= ui
                             .checkbox(
                                 &mut g.settings_edits.update_roblox,
@@ -2014,6 +2169,45 @@ fn parse_flags_json(text: &str) -> Option<(serde_json::Map<String, Value>, usize
 
 /// Lays out groups as equal-sized tiles, wrapping by the available width.
 /// Overlong tile content scrolls inside its own tile.
+/// Dropdown of Roblox's known deployment channels with a custom-entry
+/// fallback. Returns true when the value changed.
+fn channel_combo(ui: &mut egui::Ui, id_salt: &str, value: &mut String) -> bool {
+    let known = KNOWN_CHANNELS
+        .iter()
+        .any(|channel| channel.eq_ignore_ascii_case(value.trim()));
+    let selected = if value.trim().is_empty() {
+        DEFAULT_CHANNEL.to_string()
+    } else if known {
+        value.clone()
+    } else {
+        "Custom…".to_string()
+    };
+    let combo_changed = egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(selected)
+        .width(120.0)
+        .show_ui(ui, |ui| {
+            let mut changed = false;
+            for channel in KNOWN_CHANNELS {
+                changed |= ui
+                    .selectable_value(value, channel.to_string(), channel)
+                    .changed();
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Custom:");
+                changed |= ui.text_edit_singleline(value).changed();
+            });
+            changed
+        })
+        .response
+        .changed();
+    if combo_changed {
+        let text = value.trim().to_ascii_lowercase();
+        *value = text;
+    }
+    combo_changed
+}
+
 fn tile_grid<A>(ui: &mut egui::Ui, app: &mut A, tiles: Vec<(&'static str, TileBody<A>)>) {
     let [width, height] = TILE_SIZE;
     let columns = ((ui.available_width() + TILE_GAP) / (width + TILE_GAP))

@@ -25,6 +25,26 @@ pub struct Settings {
     pub background_app: bool,
     /// Delete logs and caches older than this many days after Roblox exits; 0 disables
     pub cleaner_days: u32,
+    /// Reaction when a launch URI asks for another channel:
+    /// "automatic" (switch), "prompt" (ask user), "ignore" (keep current)
+    pub channel_change_mode: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ChannelChangeMode {
+    Automatic,
+    Prompt,
+    Ignore,
+}
+
+impl Settings {
+    pub fn channel_mode(&self) -> ChannelChangeMode {
+        match self.channel_change_mode.to_ascii_lowercase().as_str() {
+            "prompt" => ChannelChangeMode::Prompt,
+            "ignore" => ChannelChangeMode::Ignore,
+            _ => ChannelChangeMode::Automatic,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -39,6 +59,7 @@ impl Default for Settings {
             theme: "default".to_string(),
             background_app: false,
             cleaner_days: 0,
+            channel_change_mode: "automatic".to_string(),
         }
     }
 }
@@ -213,6 +234,18 @@ mod tests {
         let legacy: Settings = serde_json::from_str("{\"UpdateRoblox\": false}").unwrap();
         assert!(!legacy.update_roblox);
         assert_eq!(legacy.player_channel, "production");
+    }
+
+    #[test]
+    fn channel_mode_parses() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.channel_mode(), ChannelChangeMode::Automatic);
+        settings.channel_change_mode = "Prompt".into();
+        assert_eq!(settings.channel_mode(), ChannelChangeMode::Prompt);
+        settings.channel_change_mode = "ignore".into();
+        assert_eq!(settings.channel_mode(), ChannelChangeMode::Ignore);
+        settings.channel_change_mode = "nonsense".into();
+        assert_eq!(settings.channel_mode(), ChannelChangeMode::Automatic);
     }
 
     #[test]

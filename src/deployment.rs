@@ -85,6 +85,28 @@ fn clientsettings_url(domain: &str, binary_type: &str, channel: &str, cdn: bool)
     format!("https://{service}.{domain}/{path}")
 }
 
+/// The channel Roblox's backend has the user account enrolled in.
+pub fn get_user_channel(http: &Http, settings: &Settings, binary_type: &str) -> Option<String> {
+    let url = format!(
+        "https://clientsettings.{}/v2/user-channel?binaryType={binary_type}",
+        settings.roblox_domain
+    );
+    match http.get_json_checked::<serde_json::Value>(&url) {
+        Ok(Ok(value)) => value
+            .get("channelName")
+            .and_then(|c| c.as_str())
+            .map(|c| c.to_string()),
+        Ok(Err(parse_err)) => {
+            logger::warn(&format!("Malformed user-channel response: {parse_err}"));
+            None
+        }
+        Err((_, e)) => {
+            logger::warn(&format!("Failed to get user channel: {e}"));
+            None
+        }
+    }
+}
+
 /// Fetches deployment info for a channel. `Err(Invalid)` means the caller should
 /// revert to the default channel; other errors are connectivity failures.
 pub fn get_client_version(
