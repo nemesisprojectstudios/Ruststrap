@@ -61,7 +61,7 @@ const BUTTON_SIZE: [f32; 2] = [150.0, 32.0];
 const TILE_SIZE: [f32; 2] = [320.0, 190.0];
 const TILE_GAP: f32 = 16.0;
 
-type TileBody = Box<dyn Fn(&mut egui::Ui, &mut RuststrapApp)>;
+type TileBody<A> = Box<dyn Fn(&mut egui::Ui, &mut A)>;
 
 pub fn run(ctx: Ctx) {
     let options = eframe::NativeOptions {
@@ -1686,7 +1686,7 @@ fn parse_flags_json(text: &str) -> Option<(serde_json::Map<String, Value>, usize
 
 /// Lays out groups as equal-sized tiles, wrapping by the available width.
 /// Overlong tile content scrolls inside its own tile.
-fn tile_grid(ui: &mut egui::Ui, app: &mut RuststrapApp, tiles: Vec<(&'static str, TileBody)>) {
+fn tile_grid<A>(ui: &mut egui::Ui, app: &mut A, tiles: Vec<(&'static str, TileBody<A>)>) {
     let [width, height] = TILE_SIZE;
     let columns = ((ui.available_width() + TILE_GAP) / (width + TILE_GAP)).floor().max(1.0) as usize;
     ui.vertical(|ui| {
@@ -1696,12 +1696,14 @@ fn tile_grid(ui: &mut egui::Ui, app: &mut RuststrapApp, tiles: Vec<(&'static str
                     ui.allocate_ui(egui::vec2(width, height), |ui| {
                         ui.group(|ui| {
                             ui.set_min_size(egui::vec2(width - 16.0, height - 16.0));
-                            ui.strong(*title);
-                            egui::ScrollArea::vertical()
-                                .id_salt(format!("tile-{title}"))
-                                .auto_shrink([false, false])
-                                .max_height(height - 60.0)
-                                .show(ui, |ui| body(ui, app));
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                ui.strong(*title);
+                                egui::ScrollArea::vertical()
+                                    .id_salt(format!("tile-{title}"))
+                                    .auto_shrink([false, false])
+                                    .max_height(height - 60.0)
+                                    .show(ui, |ui| body(ui, app));
+                            });
                         });
                     });
                     ui.add_space(TILE_GAP);
@@ -1732,6 +1734,89 @@ fn open_folder(path: std::path::PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tile_grid_lays_out_vertical_uniform_tiles() {
+        let ctx = egui::Context::default();
+        let observed: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, egui::Rect)>>> =
+            Default::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let bodies: Vec<(&'static str, TileBody<()>)> = ["A", "B", "C", "D", "E"]
+                        .into_iter()
+                        .map(|name| {
+                            let record = observed.clone();
+                            (
+                                name,
+                                Box::new(
+                                    move |ui: &mut egui::Ui, _app: &mut ()| {
+                                        for row in ["one", "two", "three", "four"] {
+                                            let rect = ui.label(format!("{name}-{row}")).rect;
+                                            record.borrow_mut().push((name, rect));
+                                        }
+                                    },
+                                ) as TileBody<()>,
+                            )
+                        })
+                        .collect();
+                    tile_grid(ui, &mut (), bodies);
+                });
+            });
+        });
+        out.drop_without_applying_deltas();
+
+        let labels = observed.borrow();
+        assert_eq!(labels.len(), 20);
+        for name in ["A", "B", "C", "D", "E"] {
+            let rects: Vec<egui::Rect> = labels
+                .iter()
+                .filter(|(tile, _)| *tile == name)
+                .map(|(_, r)| *r)
+                .collect();
+            assert_eq!(rects.len(), 4);
+            for pair in rects.windows(2) {
+                assert!(
+                    pair[1].min.y > pair[0].min.y,
+                    "tile {name} content must stack vertically"
+                );
+                assert!(
+                    (pair[1].min.x - pair[0].min.x).abs() < 1.0,
+                    "tile {name} content must share one column"
+                );
+            }
+        }
+        let first = |label: &str| {
+            labels
+                .iter()
+                .find(|(tile, _)| *tile == &label[..1] && label.ends_with("one"))
+                .map(|(_, r)| *r)
+                .unwrap()
+        };
+        let (a, b, c) = (first("A-one"), first("B-one"), first("C-one"));
+        assert!(
+            a.min.x + TILE_SIZE[0] <= b.min.x,
+            "tile B must tile to the side of tile A"
+        );
+        assert!(c.min.y > a.max.y, "tile C must tile below the first row");
+        for (l1, r1) in labels.iter() {
+            for (l2, r2) in labels.iter() {
+                if l1 != l2 {
+                    assert!(
+                        !r1.intersects(*r2),
+                        "labels from different tiles must not overlap"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn footer_bar_stays_pinned_across_passes() {
