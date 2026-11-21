@@ -6,7 +6,7 @@
 //! launch/update with progress and a live log, a fast flag editor, channel and
 //! cleaner settings, folder shortcuts, uninstall and (Windows) protocol toggles.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -34,6 +34,12 @@ enum Page {
 enum WorkerMsg {
     Versions { player: Option<String>, studio: Option<String> },
     SoberInstalled(bool),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum AddTab {
+    Single,
+    Json,
 }
 
 type SharedCtx = Arc<Mutex<Ctx>>;
@@ -74,8 +80,19 @@ struct RuststrapApp {
     page: Page,
     fflags: serde_json::Map<String, Value>,
     flag_edits: HashMap<String, String>,
-    new_flag_key: String,
-    new_flag_value: String,
+    flag_selected: HashSet<String>,
+    flag_search: String,
+    flag_dirty: bool,
+    confirm_delete_all: bool,
+    confirm_armed_at: Option<std::time::Instant>,
+    add_dialog_open: bool,
+    export_dialog_open: bool,
+    dialog_tab: AddTab,
+    dialog_error: Option<String>,
+    dialog_name: String,
+    dialog_value: String,
+    import_text: String,
+    export_text: String,
     settings_edits: SettingsEdits,
     confirm_uninstall: bool,
     force_reinstall: bool,
@@ -139,8 +156,19 @@ impl RuststrapApp {
             page: Page::Home,
             fflags,
             flag_edits: HashMap::new(),
-            new_flag_key: String::new(),
-            new_flag_value: String::new(),
+            flag_selected: HashSet::new(),
+            flag_search: String::new(),
+            flag_dirty: false,
+            confirm_delete_all: false,
+            confirm_armed_at: None,
+            add_dialog_open: false,
+            export_dialog_open: false,
+            dialog_tab: AddTab::Single,
+            dialog_error: None,
+            dialog_name: String::new(),
+            dialog_value: String::new(),
+            import_text: String::new(),
+            export_text: String::new(),
             settings_edits,
             confirm_uninstall: false,
             force_reinstall: false,
@@ -169,6 +197,8 @@ impl RuststrapApp {
     fn reload_flags(&mut self) {
         self.fflags = Self::load_flags();
         self.flag_edits.clear();
+        self.flag_selected.clear();
+        self.flag_dirty = false;
         logger::info("Fast flags reloaded");
     }
 
@@ -335,12 +365,20 @@ impl eframe::App for RuststrapApp {
                 });
                 ui.add_space(8.0);
             }
-            match self.page {
-            Page::Home => self.home_page(ui),
-                Page::FastFlags => self.fast_flags_page(ui),
-                Page::Settings => self.settings_page(ui),
-                Page::About => self.about_page(ui),
-            }
+            // Cap explicitly against the live viewport rect: an unbounded
+            // ScrollArea lets the page spill past the window edge with no
+            // scrollbar, so taller pages were unreachable.
+            let page_max = (ui.ctx().viewport_rect().height() - 96.0).max(160.0);
+            egui::ScrollArea::vertical()
+                .id_salt("page")
+                .auto_shrink([false, false])
+                .max_height(page_max)
+                .show(ui, |ui| match self.page {
+                    Page::Home => self.home_page(ui),
+                    Page::FastFlags => self.fast_flags_page(ui),
+                    Page::Settings => self.settings_page(ui),
+                    Page::About => self.about_page(ui),
+                });
         });
     }
 }
@@ -450,117 +488,286 @@ impl RuststrapApp {
         ui.label("Applies to the Roblox client (and to Sober on Linux with type coercion).");
         ui.add_space(8.0);
 
-        let mut changed = false;
-        let mut to_remove: Vec<String> = Vec::new();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                egui::Grid::new("fflags")
-                    .striped(true)
-                    .num_columns(3)
-                    .min_col_width(160.0)
-                    .show(ui, |ui| {
-                        for key in self.fflags.keys().cloned().collect::<Vec<_>>() {
-                            let display = if let Some(edit) = self.flag_edits.get(&key) {
-                                edit.clone()
-                            } else {
-                                match self.fflags.get(&key) {
-                                    Some(Value::String(s)) => s.clone(),
-                                    Some(other) => other.to_string(),
-                                    None => String::new(),
-                                }
-                            };
-                            ui.monospace(&key);
-                            let mut buf = display;
-                            if ui
-                                .add(
-                                    egui::TextEdit::singleline(&mut buf)
-                                        .desired_width(240.0),
-                                )
-                                .changed()
-                            {
-                                self.flag_edits.insert(key.clone(), buf);
-                                changed = true;
-                            }
-                            if ui.add_sized([90.0, 24.0], egui::Button::new("Remove")).clicked() {
-                                to_remove.push(key.clone());
-                                changed = true;
-                            }
-                            ui.end_row();
-                        }
-                    });
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.new_flag_key)
-                        .on_hover_text("Flag name");
-                    ui.text_edit_singleline(&mut self.new_flag_value)
-                        .on_hover_text("Value");
-                    if ui
-                        .add_sized(BUTTON_SIZE, egui::Button::new("Add flag"))
-                        .clicked()
-                        && !self.new_flag_key.trim().is_empty()
-                    {
-                        let key = self.new_flag_key.trim().to_string();
-                        self.fflags.insert(key.clone(), Value::String(self.new_flag_value.clone()));
-                        self.flag_edits.insert(key, self.new_flag_value.clone());
-                        self.new_flag_key.clear();
-                        self.new_flag_value.clear();
-                        changed = true;
-                    }
-                });
-            });
+        let json = serde_json::to_string_pretty(&Value::Object(self.fflags.clone()))
+            .unwrap_or_default();
 
-        for key in to_remove {
-            self.fflags.remove(&key);
-            self.flag_edits.remove(&key);
-        }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Add flag...")).clicked() {
+                self.dialog_error = None;
+                self.add_dialog_open = true;
+            }
+            let have_selection = !self.flag_selected.is_empty();
             if ui
-                .add_sized(BUTTON_SIZE, egui::Button::new(if cfg!(windows) { "Reload from file" } else { "Reload from Sober config" }))
+                .add_enabled(
+                    have_selection,
+                    egui::Button::new(format!("Delete selected ({})", self.flag_selected.len()))
+                        .min_size(BUTTON_SIZE.into()),
+                )
+                .clicked()
+            {
+                for key in self.flag_selected.drain() {
+                    self.fflags.remove(&key);
+                    self.flag_edits.remove(&key);
+                }
+                self.flag_dirty = true;
+                logger::info("Removed selected flags");
+            }
+            let delete_label = if self.confirm_delete_all {
+                "Confirm delete all?"
+            } else {
+                "Delete all"
+            };
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new(delete_label)).clicked() {
+                if self.confirm_delete_all {
+                    let count = self.fflags.len();
+                    self.fflags.clear();
+                    self.flag_edits.clear();
+                    self.flag_selected.clear();
+                    self.confirm_delete_all = false;
+                    self.flag_dirty = true;
+                    logger::info(&format!("Removed all {count} flags"));
+                } else {
+                    self.confirm_delete_all = true;
+                    self.confirm_armed_at = Some(std::time::Instant::now());
+                }
+            }
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Copy JSON")).clicked() {
+                ui.ctx().copy_text(json.clone());
+                logger::info("Fast flags JSON copied to clipboard");
+            }
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Import JSON")).clicked() {
+                self.dialog_error = None;
+                self.import_text.clear();
+                self.add_dialog_open = false;
+                self.export_dialog_open = false;
+                self.dialog_tab = AddTab::Json;
+                self.add_dialog_open = true;
+            }
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Export JSON")).clicked() {
+                self.export_text = json.clone();
+                self.export_dialog_open = true;
+            }
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new(if cfg!(windows) {
+                    "Reload from file"
+                } else {
+                    "Reload from Sober config"
+                }))
                 .clicked()
             {
                 self.reload_flags();
+                self.flag_dirty = false;
             }
-            let enabled = changed && !self.busy.load(Ordering::SeqCst);
+            if self.confirm_delete_all
+                && self
+                    .confirm_armed_at
+                    .is_some_and(|t| t.elapsed().as_secs_f32() > 5.0)
+            {
+                self.confirm_delete_all = false;
+            }
+            let save_enabled = self.flag_dirty && !self.busy.load(Ordering::SeqCst);
             if ui
-                .add_enabled(enabled, egui::Button::new("Save flags").min_size(BUTTON_SIZE.into()))
+                .add_enabled(save_enabled, egui::Button::new("Save flags").min_size(BUTTON_SIZE.into()))
                 .clicked()
             {
-            // apply live edits over the map
-            for (key, edit) in &self.flag_edits {
-                self.fflags.insert(key.clone(), Value::String(edit.clone()));
+                self.save_flags();
             }
-            self.flag_edits.clear();
-            if cfg!(windows) {
-                let path = fastflags::fflags_path(paths::get());
-                match fastflags::save(&path, &self.fflags) {
-                    Ok(()) => logger::info("Fast flags saved"),
-                    Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
-                }
-            } else {
-                // Sober reads flags from its config.json; write them there with typed values
-                let mut config = sober::load_config(paths::get());
-                let container = config
-                    .entry("fflags")
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                if !container.is_object() {
-                    *container = Value::Object(serde_json::Map::new());
-                }
-                let fflags = container.as_object_mut().expect("just ensured object");
-                for (key, value) in &self.fflags {
-                    let as_str = match value {
-                        Value::String(inner) => inner.clone(),
-                        other => other.to_string(),
-                    };
-                    fflags.insert(key.clone(), fastflags::coerce_flag(&as_str));
-                }
-                match sober::save_config(paths::get(), &config) {
-                    Ok(()) => logger::info("Fast flags saved to Sober config"),
-                    Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
-                }
-            }
-            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.flag_search)
+                    .hint_text("Search")
+                    .desired_width(160.0),
+            );
         });
+
+        let query = self.flag_search.trim().to_lowercase();
+        let rows: Vec<(String, String)> = self
+            .fflags
+            .iter()
+            .filter(|(key, _)| query.is_empty() || key.to_lowercase().contains(&query))
+            .map(|(key, value)| {
+                let text = match value {
+                    Value::String(inner) => inner.clone(),
+                    other => other.to_string(),
+                };
+                (key.clone(), text)
+            })
+            .collect();
+
+        ui.label(format!("{} flags", rows.len()));
+        ui.add_space(4.0);
+
+        if rows.is_empty() {
+            ui.weak(if self.fflags.is_empty() { "No flags set." } else { "No flags match the search." });
+        } else {
+            egui::Grid::new("fflags")
+                .striped(true)
+                .num_columns(3)
+                .min_col_width(160.0)
+                .show(ui, |ui| {
+                    for (key, value) in rows {
+                        let mut selected = self.flag_selected.contains(&key);
+                        if ui.checkbox(&mut selected, "").changed() {
+                            if selected {
+                                self.flag_selected.insert(key.clone());
+                            } else {
+                                self.flag_selected.remove(&key);
+                            }
+                        }
+                        ui.monospace(&key);
+                        let mut buf = value;
+                        if ui
+                            .add(egui::TextEdit::singleline(&mut buf).desired_width(240.0))
+                            .changed()
+                        {
+                            self.flag_edits.insert(key.clone(), buf);
+                            self.flag_dirty = true;
+                        }
+                        ui.end_row();
+                    }
+                });
+        }
+
+        if self.add_dialog_open {
+            let mut open = self.add_dialog_open;
+            egui::Window::new("Add flag")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| self.add_flag_dialog(ui));
+            self.add_dialog_open = open;
+        }
+        if self.export_dialog_open {
+            let mut open = self.export_dialog_open;
+            egui::Window::new("Export JSON")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .show(ui.ctx(), |ui| {
+                    ui.add_sized(
+                        [460.0, 200.0],
+                        egui::TextEdit::multiline(&mut self.export_text).interactive(false),
+                    );
+                    if ui.add_sized(BUTTON_SIZE, egui::Button::new("Copy to clipboard")).clicked() {
+                        ui.ctx().copy_text(self.export_text.clone());
+                        logger::info("Fast flags JSON copied to clipboard");
+                    }
+                });
+            self.export_dialog_open = open;
+        }
+    }
+
+    /// Froststrap's AddFastFlagDialog: a single flag or a pasted JSON map.
+    fn add_flag_dialog(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.dialog_tab, AddTab::Single, "Add single");
+            ui.selectable_value(&mut self.dialog_tab, AddTab::Json, "Import JSON");
+        });
+        ui.add_space(4.0);
+
+        match self.dialog_tab {
+            AddTab::Single => {
+                egui::Grid::new("add_flag_fields").num_columns(2).show(ui, |ui| {
+                    ui.label("Name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dialog_name)
+                            .hint_text("FFlagExample")
+                            .desired_width(280.0),
+                    );
+                    ui.end_row();
+                    ui.label("Value");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dialog_value)
+                            .hint_text("True")
+                            .desired_width(280.0),
+                    );
+                    ui.end_row();
+                });
+                if ui.add_sized(BUTTON_SIZE, egui::Button::new("Add flag")).clicked() {
+                    let key = self.dialog_name.trim().to_string();
+                    if key.is_empty() {
+                        self.dialog_error = Some("Flag name is required.".into());
+                    } else {
+                        self.fflags.insert(key.clone(), Value::String(self.dialog_value.clone()));
+                        self.flag_edits.insert(key, self.dialog_value.clone());
+                        self.dialog_name.clear();
+                        self.dialog_value.clear();
+                        self.dialog_error = None;
+                        self.add_dialog_open = false;
+                        self.flag_dirty = true;
+                        logger::info("Flag added");
+                    }
+                }
+            }
+            AddTab::Json => {
+                ui.add_sized(
+                    [460.0, 200.0],
+                    egui::TextEdit::multiline(&mut self.import_text)
+                        .hint_text("{\"FFlagExample\": \"True\"}"),
+                );
+                if ui.add_sized(BUTTON_SIZE, egui::Button::new("Import")).clicked() {
+                    match serde_json::from_str::<Value>(&self.import_text) {
+                        Ok(Value::Object(map)) => {
+                            let count = map.len();
+                            self.fflags.extend(map);
+                            self.flag_edits.clear();
+                            self.dialog_error = None;
+                            self.add_dialog_open = false;
+                            self.import_text.clear();
+                            self.flag_dirty = true;
+                            logger::info(&format!("Imported {count} flags"));
+                        }
+                        Ok(_) => {
+                            self.dialog_error =
+                                Some("Expected a JSON object of flag names to values.".into());
+                        }
+                        Err(e) => {
+                            self.dialog_error = Some(format!("Invalid JSON: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(error) = &self.dialog_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+    }
+
+    /// Apply the live edits to the map and persist them to
+    /// ClientAppSettings.json (Windows) or Sober's config.json (Linux).
+    fn save_flags(&mut self) {
+        for (key, edit) in &self.flag_edits {
+            self.fflags.insert(key.clone(), Value::String(edit.clone()));
+        }
+        self.flag_edits.clear();
+        self.flag_dirty = false;
+        if cfg!(windows) {
+            let path = fastflags::fflags_path(paths::get());
+            match fastflags::save(&path, &self.fflags) {
+                Ok(()) => logger::info("Fast flags saved"),
+                Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
+            }
+        } else {
+            // Sober reads flags from its config.json; write them there with typed values
+            let mut config = sober::load_config(paths::get());
+            let container = config
+                .entry("fflags")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !container.is_object() {
+                *container = Value::Object(serde_json::Map::new());
+            }
+            let fflags = container.as_object_mut().expect("just ensured object");
+            for (key, value) in &self.fflags {
+                let as_str = match value {
+                    Value::String(inner) => inner.clone(),
+                    other => other.to_string(),
+                };
+                fflags.insert(key.clone(), fastflags::coerce_flag(&as_str));
+            }
+            match sober::save_config(paths::get(), &config) {
+                Ok(()) => logger::info("Fast flags saved to Sober config"),
+                Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
+            }
+        }
     }
 
     fn settings_page(&mut self, ui: &mut egui::Ui) {
