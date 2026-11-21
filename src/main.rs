@@ -213,6 +213,13 @@ fn main() {
     logger::init(log_path);
     info(&format!("Log file: {}", paths.logs.join("Ruststrap.log").display()));
 
+    // a GUI panic would otherwise vanish with the window; record it
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC: {info}");
+        logger::error(&msg);
+        eprintln!("{msg}");
+    }));
+
     let ctx = state::Ctx::load(paths);
 
     if parsed.ui {

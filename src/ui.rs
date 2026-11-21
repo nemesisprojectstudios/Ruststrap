@@ -136,22 +136,24 @@ impl RuststrapApp {
         });
     }
 
-    fn launch_job(&mut self, mode: LaunchMode) {
+    fn launch_job(&mut self, mode: LaunchMode, force: bool) {
         self.spawn_job("Launching Roblox", move |shared, _| {
-            let outcome = {
-                let mut guard = shared.lock().unwrap();
-                let http = Http::new();
-                let mut bootstrapper = Bootstrapper::new(
-                    &http,
-                    &mut guard,
-                    mode,
-                    String::new(),
-                    None,
-                    false,
-                    false,
-                    true,
-                );
-                bootstrapper.run()
+            let outcome = match shared.lock() {
+                Ok(mut guard) => {
+                    let http = Http::new();
+                    let mut bootstrapper = Bootstrapper::new(
+                        &http,
+                        &mut guard,
+                        mode,
+                        String::new(),
+                        None,
+                        force,
+                        false,
+                        true,
+                    );
+                    bootstrapper.run()
+                }
+                Err(e) => Err(format!("state lock unavailable: {e}")),
             };
             match outcome {
                 Ok(()) => logger::info("Launch finished"),
@@ -163,7 +165,13 @@ impl RuststrapApp {
     fn check_versions_job(&mut self) {
         self.spawn_job("Checking versions", move |shared, tx| {
             let http = Http::new();
-            let guard = shared.lock().unwrap();
+            let guard = match shared.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    logger::error(&format!("state lock unavailable: {e}"));
+                    return;
+                }
+            };
             let decode = |is_studio: bool| {
                 let channel = if is_studio {
                     &guard.settings.studio_channel
@@ -221,9 +229,8 @@ impl eframe::App for RuststrapApp {
             }
         });
 
-        if let Some(p) = progress::snapshot() {
-            egui::Panel::bottom("progress").show(root, |ui| {
-                ui.add_space(6.0);
+        egui::Frame::central_panel(root.style()).show(root, |ui| {
+            if let Some(p) = progress::snapshot() {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(&p.stage);
@@ -236,15 +243,14 @@ impl eframe::App for RuststrapApp {
                         ui.label(format!("{}/{}", p.done, p.total));
                     }
                 });
-                ui.add_space(6.0);
-            });
-        }
-
-        egui::Frame::central_panel(root.style()).show(root, |ui| match self.page {
+                ui.add_space(8.0);
+            }
+            match self.page {
             Page::Home => self.home_page(ui),
-            Page::FastFlags => self.fast_flags_page(ui),
-            Page::Settings => self.settings_page(ui),
-            Page::About => self.about_page(ui),
+                Page::FastFlags => self.fast_flags_page(ui),
+                Page::Settings => self.settings_page(ui),
+                Page::About => self.about_page(ui),
+            }
         });
     }
 }
@@ -257,10 +263,10 @@ impl RuststrapApp {
         ui.horizontal(|ui| {
             let busy = self.busy.load(Ordering::SeqCst);
             if ui.add_enabled(!busy, egui::Button::new("Launch Player")).clicked() {
-                self.launch_job(LaunchMode::Player);
+                self.launch_job(LaunchMode::Player, self.force_reinstall);
             }
             if ui.add_enabled(!busy, egui::Button::new("Launch Studio")).clicked() {
-                self.launch_job(LaunchMode::Studio);
+                self.launch_job(LaunchMode::Studio, self.force_reinstall);
             }
             ui.checkbox(&mut self.force_reinstall, "Reinstall");
         });
@@ -273,12 +279,12 @@ impl RuststrapApp {
         ui.add_space(8.0);
         ui.heading("Versions");
 
-        let (player_guid, studio_guid) = {
-            let guard = self.shared.lock().unwrap();
-            (
+        let (player_guid, studio_guid) = match self.shared.lock() {
+            Ok(guard) => (
                 guard.player_state.version_guid.clone(),
                 guard.studio_state.version_guid.clone(),
-            )
+            ),
+            Err(_) => (String::new(), String::new()),
         };
 
         egui::Grid::new("versions").striped(true).num_columns(3).show(ui, |ui| {
@@ -426,7 +432,10 @@ impl RuststrapApp {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("Save settings").clicked() {
-                let mut guard = self.shared.lock().unwrap();
+                let Ok(mut guard) = self.shared.lock() else {
+                    logger::error("State file lock unavailable; settings not saved");
+                    return;
+                };
                 guard.settings.player_channel = self.settings_edits.player_channel.trim().to_ascii_lowercase();
                 guard.settings.studio_channel = self.settings_edits.studio_channel.trim().to_ascii_lowercase();
                 guard.settings.update_roblox = self.settings_edits.update_roblox;
@@ -446,8 +455,9 @@ impl RuststrapApp {
             let busy = self.busy.load(Ordering::SeqCst);
             if ui.add_enabled(!busy, egui::Button::new("Clean now")).clicked() {
                 self.spawn_job("Cleaning", |shared, _| {
-                    let guard = shared.lock().unwrap();
-                    crate::cleaner::clean_now(paths::get(), guard.settings.cleaner_days.max(1));
+                    if let Ok(guard) = shared.lock() {
+                        crate::cleaner::clean_now(paths::get(), guard.settings.cleaner_days.max(1));
+                    }
                 });
             }
             if ui.button("Open data folder").clicked() {
@@ -491,9 +501,9 @@ impl RuststrapApp {
             {
                 self.confirm_uninstall = false;
                 self.spawn_job("Uninstalling", |shared, _| {
-                    let outcome = {
-                        let mut guard = shared.lock().unwrap();
-                        packages::uninstall(paths::get(), &mut guard)
+                    let outcome = match shared.lock() {
+                        Ok(mut guard) => packages::uninstall(paths::get(), &mut guard),
+                        Err(e) => Err(format!("state lock unavailable: {e}")),
                     };
                     match outcome {
                         Ok(()) => logger::info("Uninstall finished"),

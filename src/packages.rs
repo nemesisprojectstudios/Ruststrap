@@ -136,7 +136,7 @@ pub fn upgrade(
         .settings
         .max_thread_download
         .clamp(1, 32)
-        .min(queue.lock().unwrap().len().max(1));
+        .min(queue.lock().map(|q| q.len()).unwrap_or(1).max(1));
 
     std::thread::scope(|scope| {
         for _ in 0..worker_count {
@@ -146,8 +146,8 @@ pub fn upgrade(
             let target = target.clone();
             let failed_count = failed_count.clone();
             let finished_count = finished_count.clone();
-            scope.spawn(move || loop {
-                let Some(pkg) = queue.lock().unwrap().pop() else { break };
+            scope.spawn(move || {
+                while let Some(pkg) = queue.lock().ok().and_then(|mut q| q.pop()) {
 
                 let result = (|| -> Result<(), String> {
                     let download_path = download_package(http, paths, &pkg, base_url, channel, version_guid)?;
@@ -165,21 +165,21 @@ pub fn upgrade(
                     Ok(()) => logger::info(&format!("Package ready: {}", pkg.name)),
                     Err(e) => {
                         logger::error(&format!("Failed to install {}: {e}", pkg.name));
-                        failures.lock().unwrap().push(format!("{}: {e}", pkg.name));
+                        if let Ok(mut list) = failures.lock() {
+                            list.push(format!("{}: {e}", pkg.name));
+                        }
                         failed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 let done = finished_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                crate::progress::set_counted(
-                    "Downloading packages",
-                    done,
-                    done + queue.lock().unwrap().len() as u64,
-                );
+                let remaining = queue.lock().ok().map(|q| q.len()).unwrap_or(0) as u64;
+                crate::progress::set_counted("Downloading packages", done, done + remaining);
+                }
             });
         }
     });
 
-    let failures = failures.lock().unwrap().clone();
+    let failures = failures.lock().ok().map(|f| f.clone()).unwrap_or_default();
     if !failures.is_empty() {
         return Err(format!(
             "{} package(s) failed to install: {}",
