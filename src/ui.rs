@@ -574,42 +574,43 @@ impl eframe::App for RuststrapApp {
             }
         });
 
-        egui::Panel::bottom("actions").show(root, |ui| {
-            ui.add_space(4.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let busy = self.busy.load(Ordering::SeqCst);
-                let dirty = self.flag_dirty || self.gbs_dirty || self.settings_dirty;
-                if ui
-                    .add_enabled(
-                        !busy,
-                        egui::Button::new("Save and Launch").min_size(BUTTON_SIZE.into()),
-                    )
-                    .clicked()
-                {
-                    self.save_all();
-                    self.launch_job(LaunchMode::Player, false, self.pinned_version());
-                }
-                if ui
-                    .add_enabled(
-                        dirty && !busy,
-                        egui::Button::new("Save all").min_size(BUTTON_SIZE.into()),
-                    )
-                    .clicked()
-                {
-                    self.save_all();
-                }
-                if ui
-                    .add_enabled(
-                        dirty && !busy,
-                        egui::Button::new("Revert changes").min_size(BUTTON_SIZE.into()),
-                    )
-                    .clicked()
-                {
-                    self.revert_changes();
-                }
+        egui::Panel::bottom("actions")
+            .exact_size(56.0)
+            .show(root, |ui| {
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let busy = self.busy.load(Ordering::SeqCst);
+                    let dirty = self.flag_dirty || self.gbs_dirty || self.settings_dirty;
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new("Save and Launch").min_size(BUTTON_SIZE.into()),
+                        )
+                        .clicked()
+                    {
+                        self.save_all();
+                        self.launch_job(LaunchMode::Player, false, self.pinned_version());
+                    }
+                    if ui
+                        .add_enabled(
+                            dirty && !busy,
+                            egui::Button::new("Save all").min_size(BUTTON_SIZE.into()),
+                        )
+                        .clicked()
+                    {
+                        self.save_all();
+                    }
+                    if ui
+                        .add_enabled(
+                            dirty && !busy,
+                            egui::Button::new("Revert changes").min_size(BUTTON_SIZE.into()),
+                        )
+                        .clicked()
+                    {
+                        self.revert_changes();
+                    }
+                });
             });
-            ui.add_space(4.0);
-        });
 
         egui::CentralPanel::default_margins().show(root, |ui| {
             if let Some(p) = progress::snapshot() {
@@ -1731,6 +1732,60 @@ fn open_folder(path: std::path::PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn footer_bar_stays_pinned_across_passes() {
+        let ctx = egui::Context::default();
+        let mut bars = Vec::new();
+        for (width, height) in [(800.0, 600.0), (800.0, 600.0), (1024.0, 768.0), (1024.0, 768.0)] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(width, height),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                egui::Panel::left("nav").resizable(false).show(ui, |ui| {
+                    ui.label("nav");
+                });
+                let bar =
+                    egui::Panel::bottom("actions")
+                        .exact_size(56.0)
+                        .show(ui, |ui| {
+                            ui.add_space(4.0);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label("Save and Launch");
+                                },
+                            );
+                        });
+                let central = egui::CentralPanel::default_margins().show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for i in 0..50 {
+                                ui.label(format!("row {i}"));
+                            }
+                        });
+                });
+                bars.push((bar.response.rect, central.response.rect, height));
+            });
+            out.drop_without_applying_deltas();
+        }
+        for (bar, central, height) in &bars {
+            assert!(
+                bar.max.y <= *height + 0.01,
+                "footer bar must sit inside the window, got {:?} for {height}",
+                bar
+            );
+            assert_eq!(bar.max.y, *height, "bar must touch the window bottom");
+            assert!(central.max.y <= bar.min.y + 8.0 + 0.01, "central panel must end above the bar");
+        }
+        assert_eq!(bars[0].0.size(), bars[1].0.size(), "bar height must not creep between passes");
+        assert_eq!(bars[2].0.size(), bars[3].0.size(), "bar height must not creep after resize");
+    }
 
     #[test]
     fn page_scroll_fills_central_panel() {
