@@ -20,6 +20,7 @@ use crate::logger;
 use crate::packages;
 use crate::paths::{self, DEFAULT_CHANNEL};
 use crate::progress;
+use crate::sober;
 use crate::state::Ctx;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -32,6 +33,7 @@ enum Page {
 
 enum WorkerMsg {
     Versions { player: Option<String>, studio: Option<String> },
+    SoberInstalled(bool),
 }
 
 type SharedCtx = Arc<Mutex<Ctx>>;
@@ -74,9 +76,27 @@ struct RuststrapApp {
     settings_edits: SettingsEdits,
     confirm_uninstall: bool,
     force_reinstall: bool,
+    version_pin: String,
     latest_player: Option<String>,
     latest_studio: Option<String>,
+    sober_installed: bool,
+    sober_toggles: Vec<(&'static str, &'static str, bool)>,
 }
+
+/// Sober's own options (Froststrap's SoberSettingsManager preset keys).
+const SOBER_TOGGLES: [(&str, &str); 11] = [
+    ("Allow gamepad permission", "allow_gamepad_permission"),
+    ("Enable GameMode", "enable_gamemode"),
+    ("Enable HiDPI", "enable_hidpi"),
+    ("Touch mode", "touch_mode"),
+    ("Use console experience", "use_console_experience"),
+    ("Use libsecret", "use_libsecret"),
+    ("Use OpenGL", "use_opengl"),
+    ("Server location indicator", "server_location_indicator_enabled"),
+    ("Discord RPC", "discord_rpc_enabled"),
+    ("Discord RPC join button", "discord_rpc_show_join_button"),
+    ("Close on leave", "close_on_leave"),
+];
 
 #[derive(Default)]
 struct SettingsEdits {
@@ -85,18 +105,38 @@ struct SettingsEdits {
     cleaner_days: u32,
     max_threads: usize,
     update_roblox: bool,
+    background_app: bool,
 }
 
 impl RuststrapApp {
     fn new(ctx: Ctx) -> RuststrapApp {
         let (tx, rx) = mpsc::channel();
-        let fflags = fastflags::load_or_init(paths::get());
+        // Flags live in ClientAppSettings.json on Windows; in Sober's
+        // config.json on Linux (Sober never reads ClientAppSettings).
+        let fflags = if cfg!(windows) {
+            fastflags::load_or_init(paths::get())
+        } else {
+            sober::load_config(paths::get())
+                .get("fflags")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default()
+        };
+        let mut sober_toggles = Vec::new();
+        if !cfg!(windows) {
+            let config = sober::load_config(paths::get());
+            for (label, key) in SOBER_TOGGLES {
+                let on = sober::config_bool(&config, key).unwrap_or(false);
+                sober_toggles.push((label, key, on));
+            }
+        }
         let settings_edits = SettingsEdits {
             player_channel: ctx.settings.player_channel.clone(),
             studio_channel: ctx.settings.studio_channel.clone(),
             cleaner_days: ctx.settings.cleaner_days,
             max_threads: ctx.settings.max_thread_download,
             update_roblox: ctx.settings.update_roblox,
+            background_app: ctx.settings.background_app,
         };
         RuststrapApp {
             shared: Arc::new(Mutex::new(ctx)),
@@ -111,8 +151,11 @@ impl RuststrapApp {
             settings_edits,
             confirm_uninstall: false,
             force_reinstall: false,
+            version_pin: String::new(),
             latest_player: None,
             latest_studio: None,
+            sober_installed: !cfg!(windows) && sober::is_installed(),
+            sober_toggles,
         }
     }
 
@@ -130,13 +173,18 @@ impl RuststrapApp {
         let busy = self.busy.clone();
         std::thread::spawn(move || {
             progress::set(title);
-            work(&shared, &tx);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                work(&shared, &tx);
+            }));
+            if result.is_err() {
+                logger::error(&format!("{title} crashed (panic)"));
+            }
             progress::clear();
             busy.store(false, Ordering::SeqCst);
         });
     }
 
-    fn launch_job(&mut self, mode: LaunchMode, force: bool) {
+    fn launch_job(&mut self, mode: LaunchMode, force: bool, pin: Option<String>) {
         self.spawn_job("Launching Roblox", move |shared, _| {
             let outcome = match shared.lock() {
                 Ok(mut guard) => {
@@ -146,7 +194,7 @@ impl RuststrapApp {
                         &mut guard,
                         mode,
                         String::new(),
-                        None,
+                        pin,
                         force,
                         false,
                         true,
@@ -159,6 +207,28 @@ impl RuststrapApp {
                 Ok(()) => logger::info("Launch finished"),
                 Err(e) => logger::error(&format!("Launch failed: {e}")),
             }
+        });
+    }
+
+    fn pinned_version(&self) -> Option<String> {
+        let pin = self.version_pin.trim();
+        if pin.is_empty() {
+            None
+        } else {
+            Some(pin.to_string())
+        }
+    }
+
+    /// Installs Sober when missing (update=false) or updates it (update=true).
+    fn sober_job(&mut self, update: bool) {
+        let title = if update { "Updating Sober" } else { "Installing Sober" };
+        self.spawn_job(title, move |_, tx| {
+            let outcome = if update { sober::update() } else { sober::ensure_installed() };
+            match outcome {
+                Ok(()) => {}
+                Err(e) => logger::error(&format!("{title} failed: {e}")),
+            }
+            let _ = tx.send(WorkerMsg::SoberInstalled(sober::is_installed()));
         });
     }
 
@@ -191,7 +261,8 @@ impl RuststrapApp {
                     }
                 }
             };
-            let player = decode(false);
+            // Studio is packaged on every platform; on Linux the player is Sober's.
+            let player = if cfg!(windows) { decode(false) } else { None };
             let studio = decode(true);
             let _ = tx.send(WorkerMsg::Versions { player, studio });
         });
@@ -206,6 +277,7 @@ impl eframe::App for RuststrapApp {
                     self.latest_player = player;
                     self.latest_studio = studio;
                 }
+                WorkerMsg::SoberInstalled(installed) => self.sober_installed = installed,
             }
         }
 
@@ -263,12 +335,24 @@ impl RuststrapApp {
         ui.horizontal(|ui| {
             let busy = self.busy.load(Ordering::SeqCst);
             if ui.add_enabled(!busy, egui::Button::new("Launch Player")).clicked() {
-                self.launch_job(LaunchMode::Player, self.force_reinstall);
+                self.launch_job(LaunchMode::Player, self.force_reinstall, self.pinned_version());
             }
             if ui.add_enabled(!busy, egui::Button::new("Launch Studio")).clicked() {
-                self.launch_job(LaunchMode::Studio, self.force_reinstall);
+                self.launch_job(LaunchMode::Studio, self.force_reinstall, self.pinned_version());
             }
             ui.checkbox(&mut self.force_reinstall, "Reinstall");
+        });
+        ui.horizontal(|ui| {
+            let hint = if cfg!(windows) {
+                "Pin a client version (version-<hash>), blank = latest"
+            } else {
+                "Pin a Studio client version (version-<hash>), blank = latest"
+            };
+            ui.add(
+                egui::TextEdit::singleline(&mut self.version_pin)
+                    .hint_text(hint)
+                    .desired_width(360.0),
+            );
         });
         if linux_player {
             ui.label("Player is managed by Sober on Linux (Flatpak).");
@@ -299,6 +383,19 @@ impl RuststrapApp {
 
         if ui.button("Check for updates").clicked() {
             self.check_versions_job();
+        }
+
+        if !cfg!(windows) {
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.heading("Sober");
+            let busy = self.busy.load(Ordering::SeqCst);
+            ui.label(if self.sober_installed { "Sober is installed" } else { "Sober is not installed" });
+            let label = if self.sober_installed { "Update Sober" } else { "Install Sober" };
+            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                self.sober_job(self.sober_installed);
+            }
         }
 
         ui.add_space(16.0);
@@ -386,15 +483,33 @@ impl RuststrapApp {
                 self.fflags.insert(key.clone(), Value::String(edit.clone()));
             }
             self.flag_edits.clear();
-            let path = fastflags::fflags_path(paths::get());
-            match fastflags::save(&path, &self.fflags) {
-                Ok(()) => {
-                    logger::info("Fast flags saved");
-                    if !cfg!(windows) {
-                        crate::sober::sync_fflags(paths::get(), &self.fflags);
-                    }
+            if cfg!(windows) {
+                let path = fastflags::fflags_path(paths::get());
+                match fastflags::save(&path, &self.fflags) {
+                    Ok(()) => logger::info("Fast flags saved"),
+                    Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
                 }
-                Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
+            } else {
+                // Sober reads flags from its config.json; write them there with typed values
+                let mut config = sober::load_config(paths::get());
+                let container = config
+                    .entry("fflags")
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                if !container.is_object() {
+                    *container = Value::Object(serde_json::Map::new());
+                }
+                let fflags = container.as_object_mut().expect("just ensured object");
+                for (key, value) in &self.fflags {
+                    let as_str = match value {
+                        Value::String(inner) => inner.clone(),
+                        other => other.to_string(),
+                    };
+                    fflags.insert(key.clone(), fastflags::coerce_flag(&as_str));
+                }
+                match sober::save_config(paths::get(), &config) {
+                    Ok(()) => logger::info("Fast flags saved to Sober config"),
+                    Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
+                }
             }
         }
     }
@@ -419,6 +534,7 @@ impl RuststrapApp {
         ui.group(|ui| {
             ui.label("Behavior");
             ui.checkbox(&mut self.settings_edits.update_roblox, "Update Roblox before launch");
+            ui.checkbox(&mut self.settings_edits.background_app, "Keep Roblox running in the background when closed");
             ui.horizontal(|ui| {
                 ui.label("Parallel downloads");
                 ui.add(egui::Slider::new(&mut self.settings_edits.max_threads, 1..=32));
@@ -439,12 +555,44 @@ impl RuststrapApp {
                 guard.settings.player_channel = self.settings_edits.player_channel.trim().to_ascii_lowercase();
                 guard.settings.studio_channel = self.settings_edits.studio_channel.trim().to_ascii_lowercase();
                 guard.settings.update_roblox = self.settings_edits.update_roblox;
+                guard.settings.background_app = self.settings_edits.background_app;
                 guard.settings.max_thread_download = self.settings_edits.max_threads;
                 guard.settings.cleaner_days = self.settings_edits.cleaner_days;
                 guard.save_settings();
                 logger::info("Settings saved");
             }
         });
+
+        if !cfg!(windows) {
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.heading(format!("Sober settings ({})", sober::config_file(paths::get()).display()));
+            let busy = self.busy.load(Ordering::SeqCst);
+            egui::Grid::new("sober_toggles").num_columns(2).show(ui, |ui| {
+                for index in 0..self.sober_toggles.len() {
+                    ui.monospace(self.sober_toggles[index].0);
+                    ui.checkbox(&mut self.sober_toggles[index].2, "");
+                    ui.end_row();
+                }
+            });
+            if ui.add_enabled(!busy, egui::Button::new("Save Sober settings")).clicked() {
+                let toggles = self.sober_toggles
+                    .iter()
+                    .map(|(_, key, on)| (key.to_string(), *on))
+                    .collect::<Vec<_>>();
+                self.spawn_job("Saving Sober settings", move |_, _| {
+                    let mut config = sober::load_config(paths::get());
+                    for (key, on) in toggles {
+                        config.insert(key, Value::Bool(on));
+                    }
+                    match sober::save_config(paths::get(), &config) {
+                        Ok(()) => logger::info("Sober settings saved"),
+                        Err(e) => logger::error(&format!("Failed to save Sober settings: {e}")),
+                    }
+                });
+            }
+        }
 
         ui.add_space(16.0);
         ui.separator();

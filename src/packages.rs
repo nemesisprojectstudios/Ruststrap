@@ -20,7 +20,7 @@ pub fn binary_type(is_studio: bool) -> &'static str {
         (true, _) => "WindowsStudio64",
         (false, true) => "WindowsPlayer",
         // Linux player never downloads packages: Sober fetches its own client.
-        _ => unreachable!(),
+        _ => SOBER_DIR_NAME,
     }
 }
 

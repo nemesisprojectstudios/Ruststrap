@@ -27,6 +27,10 @@ fn flatpak_ok(args: &[&str]) -> Result<bool, String> {
     }
 }
 
+pub fn is_installed() -> bool {
+    flatpak_ok(&["info", SOBER_FLATPAK_ID]).unwrap_or(false)
+}
+
 /// Verifies flatpak works and Sober is installed, installing it from Flathub if missing.
 pub fn ensure_installed() -> Result<(), String> {
     logger::info("Checking Flatpak installation");
@@ -36,7 +40,7 @@ pub fn ensure_installed() -> Result<(), String> {
         Err(_) => return Err("Flatpak is required on Linux; install Flatpak and try again".to_string()),
     }
 
-    if flatpak_ok(&["info", SOBER_FLATPAK_ID]) == Ok(true) {
+    if is_installed() {
         logger::info("Sober is already installed");
         return Ok(());
     }
@@ -52,6 +56,22 @@ pub fn ensure_installed() -> Result<(), String> {
         return Err(format!("flatpak install {SOBER_FLATPAK_ID} failed"));
     }
     logger::info("Sober installed");
+    Ok(())
+}
+
+/// Updates an existing Sober flatpak to the latest Flathub build.
+pub fn update() -> Result<(), String> {
+    logger::info("Updating Sober via flatpak (may take a while)");
+    let status = Command::new("flatpak")
+        .args(["update", "--noninteractive", SOBER_FLATPAK_ID])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| format!("cannot run flatpak: {e}"))?;
+    if !status.success() {
+        return Err(format!("flatpak update {SOBER_FLATPAK_ID} failed"));
+    }
+    logger::info("Sober updated");
     Ok(())
 }
 
@@ -113,52 +133,44 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Syncs fast flags into Sober's config so its sandboxed client sees typed values.
-pub fn sync_fflags(paths: &Paths, flags: &Map<String, Value>) {
-    if flags.is_empty() {
-        return;
-    }
+/// Loads Sober's config.json as a JSON object (empty when missing or unreadable).
+/// This is the single source of truth for fast flags and Sober's own options on Linux.
+pub fn load_config(paths: &Paths) -> Map<String, Value> {
     let path = config_file(paths);
-    let mut config: Map<String, Value> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .and_then(|v: Value| v.as_object().cloned())
-        .unwrap_or_default();
-    if path.exists() && config.is_empty() {
-        logger::error(&format!(
-            "{} is unreadable; fast flags will not be synced to Sober",
-            path.display()
-        ));
-        return;
-    }
-
-    let fflags = config
-        .entry("fflags")
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !fflags.is_object() {
-        *fflags = Value::Object(Map::new());
-    }
-    let fflags = fflags.as_object_mut().unwrap();
-    for (key, value) in flags {
-        let as_str = match value {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        fflags.insert(key.clone(), crate::fastflags::coerce_flag(&as_str));
-    }
-
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    match serde_json::to_string_pretty(&config) {
-        Ok(contents) => {
-            if let Err(e) = std::fs::write(&path, contents) {
-                logger::error(&format!("Failed to write Sober config: {e}"));
-            } else {
-                logger::info(&format!("Synced {} flags into Sober config", flags.len()));
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str::<Value>(&contents) {
+            Ok(value) => value.as_object().cloned().unwrap_or_default(),
+            Err(e) => {
+                logger::error(&format!(
+                    "{} is not valid JSON ({}); using defaults",
+                    path.display(),
+                    e
+                ));
+                Map::new()
             }
-        }
-        Err(e) => logger::error(&format!("Failed to serialize Sober config: {e}")),
+        },
+        Err(_) => Map::new(),
+    }
+}
+
+/// Writes Sober's config.json, preserving any keys the caller left untouched.
+pub fn save_config(paths: &Paths, config: &Map<String, Value>) -> Result<(), String> {
+    let path = config_file(paths);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    let contents = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("serialize Sober config: {e}"))?;
+    std::fs::write(&path, contents).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Reads a Sober config key, accepting typed or string-encoded booleans.
+pub fn config_bool(config: &Map<String, Value>, key: &str) -> Option<bool> {
+    match config.get(key) {
+        Some(Value::Bool(b)) => Some(*b),
+        Some(Value::String(s)) => Some(s.eq_ignore_ascii_case("true")),
+        _ => None,
     }
 }
 

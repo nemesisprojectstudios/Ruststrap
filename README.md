@@ -13,9 +13,9 @@ A native, headless Rust rewrite of [Froststrap](https://github.com/Froststrap/Fr
 
 The window (`src/ui.rs`, egui) carries Froststrap's core feature set:
 
-- **Home**: Launch Player / Launch Studio buttons, optional reinstall-on-launch, installed vs. latest channel versions, and a live log pane; a progress bar with package counters while downloads run.
-- **Fast Flags**: add, edit, and remove flags; saved to `ClientAppSettings.json` and synced (with type coercion) into Sober on Linux.
-- **Settings**: per-mode release channels, parallel download count, cleaner age, update toggles, "Clean now", folder shortcuts (data / modifications / logs), protocol registration toggles (Windows), and a confirmed "Uninstall Roblox".
+- **Home**: Launch Player / Launch Studio buttons, optional reinstall-on-launch, an optional client version pin, installed vs. latest channel versions, Sober install/update status on Linux, and a live log pane; a progress bar with package counters while downloads run.
+- **Fast Flags**: add, edit, and remove flags — stored in `ClientAppSettings.json` on Windows and written directly into Sober's `config.json` (typed values) on Linux.
+- **Settings**: per-mode release channels, parallel download count, cleaner age, update/background toggles, Sober's own config options on Linux, "Clean now", folder shortcuts (data / Roblox / modifications / logs), protocol registration toggles (Windows), and a confirmed "Uninstall Roblox".
 - **About**: version, links, license.
 
 Background work runs on worker threads and reports through a shared progress slot and the log ring buffer, so the UI always stays responsive.
@@ -37,7 +37,7 @@ ruststrap --player --force # headless reinstall + launch
 | Studio | `WindowsStudio64` packages, launched natively (`RobloxStudioBeta.exe`) | `WindowsStudio64` packages run through **Wine** (system install, dedicated prefix in the data root) |
 
 - **Windows**: registers the `roblox-player:` / `roblox:` / `roblox-studio:` / `roblox-studio-auth:` protocol handlers and `.rbxl*`/`.rbxm*` file associations under `HKCU`, tracks client locations and channels in a `Ruststrap` registry key, and can re-use verified packages already stocked by the official launcher's `%LOCALAPPDATA%/Roblox/Downloads` cache (same MD5 "FastHash" scheme).
-- **Linux Player**: ensures Sober is installed from Flathub, maps `~/.var/app/org.vinegarhq.Sober` to Ruststrap's data root, translates `roblox-player:` URIs to `roblox://experiences/start?...` and syncs fast flags (with type coercion) into Sober's `config.json`.
+- **Linux Player**: ensures Sober is installed from Flathub, maps `~/.var/app/org.vinegarhq.Sober` to Ruststrap's data root, translates `roblox-player:` URIs to `roblox://experiences/start?...`. Fast flags and Sober's own options (GameMode, HiDPI, Discord RPC, …) are read from and written to Sober's `config.json` with typed values.
 - **Linux Studio**: downloads the same Windows Studio packages, initializes a Wine prefix on first run, and launches `RobloxStudioBeta.exe` through it.
 - **Channels**: per-mode channel support, arriving via `--channel`, a `channel:` token in the launch URI, or saved settings; private/unusable channels revert to `production` automatically (HTTP 401/403/404 detection on both the CDN and non-CDN settings endpoints).
 

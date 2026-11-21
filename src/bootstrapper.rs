@@ -81,6 +81,12 @@ impl<'a> Bootstrapper<'a> {
         let lock = FileLock::acquire(&self.paths.data_root, "Bootstrapper");
         logger::info("Lock acquired");
 
+        // On Linux the player's client is entirely managed by Sober: skip the
+        // deployment check, version resolution, and all package machinery.
+        if !cfg!(windows) && !self.is_studio() {
+            return self.run_sober_flow();
+        }
+
         progress::set("Fetching deployment info");
         let version = self.resolve_version(&channel)?;
         if !version.version.is_empty() {
@@ -90,8 +96,6 @@ impl<'a> Bootstrapper<'a> {
             ));
         }
 
-        // On Linux the player's client packages are entirely managed by Sober,
-        // so only config, flags and launching are handled here.
         if cfg!(windows) || self.is_studio() {
             self.run_packaged_flow(&channel, &version.version_guid)?;
         } else {
@@ -171,9 +175,6 @@ impl<'a> Bootstrapper<'a> {
         logger::info("Linux (Player): Sober manages Roblox, skipping deployment check");
         sober::setup_symlink(self.paths);
         sober::ensure_installed()?;
-
-        let flags = crate::fastflags::load_or_init(self.paths);
-        sober::sync_fflags(self.paths, &flags);
         sober::kill();
 
         self.ctx.state.is_first_launch = false;
