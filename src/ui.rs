@@ -59,7 +59,7 @@ const BUTTON_SIZE: [f32; 2] = [150.0, 32.0];
 
 /// Uniform size of a settings tile and the gap between tiles.
 const TILE_SIZE: [f32; 2] = [320.0, 190.0];
-const TILE_GAP: f32 = 16.0;
+const TILE_GAP: f32 = 20.0;
 
 type TileBody<A> = Box<dyn Fn(&mut egui::Ui, &mut A)>;
 
@@ -1206,7 +1206,10 @@ impl RuststrapApp {
                         ui.horizontal(|ui| {
                             ui.label("Framerate limit (0 = none)");
                             if ui
-                                .add(egui::DragValue::new(&mut g.gbs_edits.framerate_cap).range(0..=999))
+                                .add(
+                                    egui::DragValue::new(&mut g.gbs_edits.framerate_cap)
+                                        .min_size(egui::vec2(140.0, 0.0)),
+                                )
                                 .changed()
                             {
                                 g.gbs_dirty = true;
@@ -1251,8 +1254,10 @@ impl RuststrapApp {
                             ui.label("Mouse sensitivity");
                             if ui
                                 .add(
-                                    egui::Slider::new(&mut g.gbs_edits.mouse_sensitivity, 0.0..=20.0)
-                                        .fixed_decimals(1),
+                                    egui::DragValue::new(&mut g.gbs_edits.mouse_sensitivity)
+                                        .speed(0.1)
+                                        .fixed_decimals(1)
+                                        .min_size(egui::vec2(140.0, 0.0)),
                                 )
                                 .changed()
                             {
@@ -1263,18 +1268,6 @@ impl RuststrapApp {
                         g.vector_row(ui, "First person sensitivity", true);
                         g.vector_row(ui, "Third person sensitivity", false);
                         gbs_bool_row(ui, "Invert camera Y", &mut g.gbs_edits.camera_y_inverted, &mut g.gbs_dirty);
-                        ui.horizontal(|ui| {
-                            ui.label("Haptic strength");
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut g.gbs_edits.haptic_strength, 0.0..=1.0)
-                                        .fixed_decimals(1),
-                                )
-                                .changed()
-                            {
-                                g.gbs_dirty = true;
-                            }
-                        });
                     }),
                 ),
                 (
@@ -1317,6 +1310,18 @@ impl RuststrapApp {
                     Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
                         gbs_bool_row(ui, "Chat translation", &mut g.gbs_edits.chat_translation, &mut g.gbs_dirty);
                         gbs_bool_row(ui, "Enable VR", &mut g.gbs_edits.vr, &mut g.gbs_dirty);
+                        ui.horizontal(|ui| {
+                            ui.label("Haptic strength");
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut g.gbs_edits.haptic_strength, 0.0..=1.0)
+                                        .fixed_decimals(1),
+                                )
+                                .changed()
+                            {
+                                g.gbs_dirty = true;
+                            }
+                        });
                     }),
                 ),
             ],
@@ -1690,8 +1695,10 @@ fn tile_grid<A>(ui: &mut egui::Ui, app: &mut A, tiles: Vec<(&'static str, TileBo
     let [width, height] = TILE_SIZE;
     let columns = ((ui.available_width() + TILE_GAP) / (width + TILE_GAP)).floor().max(1.0) as usize;
     ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = TILE_GAP;
         for row in tiles.chunks(columns) {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = TILE_GAP;
                 for (title, body) in row {
                     ui.allocate_ui(egui::vec2(width, height), |ui| {
                         ui.group(|ui| {
@@ -1706,7 +1713,6 @@ fn tile_grid<A>(ui: &mut egui::Ui, app: &mut A, tiles: Vec<(&'static str, TileBo
                             });
                         });
                     });
-                    ui.add_space(TILE_GAP);
                 }
             });
         }
@@ -1801,6 +1807,12 @@ mod tests {
                 .unwrap()
         };
         let (a, b, c) = (first("A-one"), first("B-one"), first("C-one"));
+        let x_gap = b.min.x - a.min.x - TILE_SIZE[0];
+        let y_gap = c.min.y - a.min.y - TILE_SIZE[1];
+        assert!(
+            (x_gap - y_gap).abs() <= 2.0,
+            "tile gaps must match: {x_gap} vs {y_gap}"
+        );
         assert!(
             a.min.x + TILE_SIZE[0] <= b.min.x,
             "tile B must tile to the side of tile A"
