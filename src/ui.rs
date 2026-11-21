@@ -57,6 +57,12 @@ type SharedCtx = Arc<Mutex<Ctx>>;
 /// Every button uses this size so the layout stays uniform.
 const BUTTON_SIZE: [f32; 2] = [150.0, 32.0];
 
+/// Uniform size of a settings tile and the gap between tiles.
+const TILE_SIZE: [f32; 2] = [320.0, 190.0];
+const TILE_GAP: f32 = 16.0;
+
+type TileBody = Box<dyn Fn(&mut egui::Ui, &mut RuststrapApp)>;
+
 pub fn run(ctx: Ctx) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -112,6 +118,7 @@ struct RuststrapApp {
     gbs_read_only: bool,
     gbs_save_error: Option<String>,
     settings_edits: SettingsEdits,
+    settings_dirty: bool,
     confirm_uninstall: bool,
     force_reinstall: bool,
     version_pin: String,
@@ -294,6 +301,7 @@ impl RuststrapApp {
             gbs_read_only: false,
             gbs_save_error: None,
             settings_edits,
+            settings_dirty: false,
             confirm_uninstall: false,
             force_reinstall: false,
             version_pin: String::new(),
@@ -566,6 +574,43 @@ impl eframe::App for RuststrapApp {
             }
         });
 
+        egui::Panel::bottom("actions").show(root, |ui| {
+            ui.add_space(4.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let busy = self.busy.load(Ordering::SeqCst);
+                let dirty = self.flag_dirty || self.gbs_dirty || self.settings_dirty;
+                if ui
+                    .add_enabled(
+                        !busy,
+                        egui::Button::new("Save and Launch").min_size(BUTTON_SIZE.into()),
+                    )
+                    .clicked()
+                {
+                    self.save_all();
+                    self.launch_job(LaunchMode::Player, false, self.pinned_version());
+                }
+                if ui
+                    .add_enabled(
+                        dirty && !busy,
+                        egui::Button::new("Save all").min_size(BUTTON_SIZE.into()),
+                    )
+                    .clicked()
+                {
+                    self.save_all();
+                }
+                if ui
+                    .add_enabled(
+                        dirty && !busy,
+                        egui::Button::new("Revert changes").min_size(BUTTON_SIZE.into()),
+                    )
+                    .clicked()
+                {
+                    self.revert_changes();
+                }
+            });
+            ui.add_space(4.0);
+        });
+
         egui::CentralPanel::default_margins().show(root, |ui| {
             if let Some(p) = progress::snapshot() {
                 ui.horizontal(|ui| {
@@ -702,7 +747,9 @@ impl RuststrapApp {
 
     fn fast_flags_page(&mut self, ui: &mut egui::Ui) {
         ui.heading("Fast Flags");
-        ui.label("Applies to the Roblox client (and to Sober on Linux with type coercion).");
+        ui.label(
+            "Applies to the Roblox client. On Linux, flag values are converted for Sober's config.",
+        );
         ui.add_space(8.0);
 
         let json = serde_json::to_string_pretty(&Value::Object(self.fflags.clone()))
@@ -966,6 +1013,57 @@ impl RuststrapApp {
 
     /// Apply the live edits to the map and persist them to
     /// ClientAppSettings.json (Windows) or Sober's config.json (Linux).
+    /// Persists every tab with unsaved edits (fast flags, Roblox settings, app settings).
+    fn save_all(&mut self) {
+        if self.flag_dirty {
+            self.save_flags();
+        }
+        if self.gbs_dirty {
+            self.save_gbs();
+        }
+        if self.settings_dirty {
+            self.save_settings_edits();
+        }
+    }
+
+    /// Discards unsaved edits and reloads everything from disk.
+    fn revert_changes(&mut self) {
+        self.reload_flags();
+        self.reload_gbs();
+        let Ok(guard) = self.shared.lock() else {
+            logger::error("State file lock unavailable; keeping current settings view");
+            return;
+        };
+        self.settings_edits = SettingsEdits {
+            player_channel: guard.settings.player_channel.clone(),
+            studio_channel: guard.settings.studio_channel.clone(),
+            cleaner_days: guard.settings.cleaner_days,
+            max_threads: guard.settings.max_thread_download,
+            update_roblox: guard.settings.update_roblox,
+            background_app: guard.settings.background_app,
+        };
+        drop(guard);
+        self.settings_dirty = false;
+        logger::info("Unsaved changes reverted");
+    }
+
+    fn save_settings_edits(&mut self) {
+        let Ok(mut guard) = self.shared.lock() else {
+            logger::error("State file lock unavailable; settings not saved");
+            return;
+        };
+        guard.settings.player_channel = self.settings_edits.player_channel.trim().to_ascii_lowercase();
+        guard.settings.studio_channel = self.settings_edits.studio_channel.trim().to_ascii_lowercase();
+        guard.settings.update_roblox = self.settings_edits.update_roblox;
+        guard.settings.background_app = self.settings_edits.background_app;
+        guard.settings.max_thread_download = self.settings_edits.max_threads;
+        guard.settings.cleaner_days = self.settings_edits.cleaner_days;
+        guard.save_settings();
+        drop(guard);
+        self.settings_dirty = false;
+        logger::info("Settings saved");
+    }
+
     fn save_flags(&mut self) {
         for (key, edit) in &self.flag_edits {
             self.fflags.insert(key.clone(), Value::String(edit.clone()));
@@ -1097,120 +1195,131 @@ impl RuststrapApp {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
 
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label("Graphics");
-            ui.horizontal(|ui| {
-                ui.label("Framerate limit (0 = none)");
-                if ui
-                    .add(egui::DragValue::new(&mut self.gbs_edits.framerate_cap).range(0..=999))
-                    .changed()
-                {
-                    self.gbs_dirty = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Start quality level");
-                if ui
-                    .add(egui::Slider::new(&mut self.gbs_edits.quality_level, 0..=10))
-                    .changed()
-                {
-                    self.gbs_dirty = true;
-                }
-            });
-            gbs_bool_row(ui, "Start in fullscreen", &mut self.gbs_edits.fullscreen, &mut self.gbs_dirty);
-            gbs_bool_row(
-                ui,
-                "Automatically create max quality",
-                &mut self.gbs_edits.max_quality,
-                &mut self.gbs_dirty,
-            );
-            gbs_bool_row(ui, "Vignette", &mut self.gbs_edits.vignette, &mut self.gbs_dirty);
-        });
-
-        ui.group(|ui| {
-            ui.label("Audio");
-            for (label, field) in [
-                ("Master volume", "master_volume"),
-                ("Studio master volume", "studio_volume"),
-                ("Party voice volume", "party_voice"),
-                ("Voice chat volume", "voice_chat"),
-            ] {
-                self.audio_slider_row(ui, label, field);
-            }
-        });
-
-        ui.group(|ui| {
-            ui.label("Input");
-            ui.horizontal(|ui| {
-                ui.label("Mouse sensitivity");
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.gbs_edits.mouse_sensitivity, 0.0..=20.0)
-                            .fixed_decimals(1),
-                    )
-                    .changed()
-                {
-                    self.gbs_dirty = true;
-                }
-            });
-            gbs_bool_row(ui, "Shift lock switch", &mut self.gbs_edits.shift_lock, &mut self.gbs_dirty);
-            self.vector_row(ui, "First person sensitivity", true);
-            self.vector_row(ui, "Third person sensitivity", false);
-            gbs_bool_row(ui, "Invert camera Y", &mut self.gbs_edits.camera_y_inverted, &mut self.gbs_dirty);
-            ui.horizontal(|ui| {
-                ui.label("Haptic strength");
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.gbs_edits.haptic_strength, 0.0..=1.0)
-                            .fixed_decimals(1),
-                    )
-                    .changed()
-                {
-                    self.gbs_dirty = true;
-                }
-            });
-        });
-
-        ui.group(|ui| {
-            ui.label("Accessibility");
-            ui.horizontal(|ui| {
-                ui.label("UI transparency (0-1)");
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut self.gbs_edits.ui_transparency)
-                            .desired_width(80.0),
-                    )
-                    .changed()
-                {
-                    self.gbs_dirty = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Player list layout");
-                if ui
-                    .add(egui::DragValue::new(&mut self.gbs_edits.player_list_layout).range(0..=1))
-                    .changed()
-                {
-                    self.gbs_dirty = true;
-                }
-                ui.label("Text size");
-                if ui
-                    .add(egui::DragValue::new(&mut self.gbs_edits.font_size).range(1..=4))
-                    .changed()
-                {
-                    self.gbs_dirty = true;
-                }
-            });
-            gbs_bool_row(ui, "Reduce motion", &mut self.gbs_edits.reduced_motion, &mut self.gbs_dirty);
-            gbs_bool_row(ui, "Show performance stats", &mut self.gbs_edits.perf_stats, &mut self.gbs_dirty);
-        });
-
-        ui.group(|ui| {
-            ui.label("Miscellaneous");
-            gbs_bool_row(ui, "Chat translation", &mut self.gbs_edits.chat_translation, &mut self.gbs_dirty);
-            gbs_bool_row(ui, "Enable VR", &mut self.gbs_edits.vr, &mut self.gbs_dirty);
-        });
+        tile_grid(
+            ui,
+            self,
+            vec![
+                (
+                    "Graphics",
+                    Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        ui.horizontal(|ui| {
+                            ui.label("Framerate limit (0 = none)");
+                            if ui
+                                .add(egui::DragValue::new(&mut g.gbs_edits.framerate_cap).range(0..=999))
+                                .changed()
+                            {
+                                g.gbs_dirty = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Start quality level");
+                            if ui
+                                .add(egui::Slider::new(&mut g.gbs_edits.quality_level, 0..=10))
+                                .changed()
+                            {
+                                g.gbs_dirty = true;
+                            }
+                        });
+                        gbs_bool_row(ui, "Start in fullscreen", &mut g.gbs_edits.fullscreen, &mut g.gbs_dirty);
+                        gbs_bool_row(
+                            ui,
+                            "Automatically create max quality",
+                            &mut g.gbs_edits.max_quality,
+                            &mut g.gbs_dirty,
+                        );
+                        gbs_bool_row(ui, "Vignette", &mut g.gbs_edits.vignette, &mut g.gbs_dirty);
+                    }),
+                ),
+                (
+                    "Audio",
+                    Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        for (label, field) in [
+                            ("Master volume", "master_volume"),
+                            ("Studio master volume", "studio_volume"),
+                            ("Party voice volume", "party_voice"),
+                            ("Voice chat volume", "voice_chat"),
+                        ] {
+                            g.audio_slider_row(ui, label, field);
+                        }
+                    }),
+                ),
+                (
+                    "Input",
+                    Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        ui.horizontal(|ui| {
+                            ui.label("Mouse sensitivity");
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut g.gbs_edits.mouse_sensitivity, 0.0..=20.0)
+                                        .fixed_decimals(1),
+                                )
+                                .changed()
+                            {
+                                g.gbs_dirty = true;
+                            }
+                        });
+                        gbs_bool_row(ui, "Shift lock switch", &mut g.gbs_edits.shift_lock, &mut g.gbs_dirty);
+                        g.vector_row(ui, "First person sensitivity", true);
+                        g.vector_row(ui, "Third person sensitivity", false);
+                        gbs_bool_row(ui, "Invert camera Y", &mut g.gbs_edits.camera_y_inverted, &mut g.gbs_dirty);
+                        ui.horizontal(|ui| {
+                            ui.label("Haptic strength");
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut g.gbs_edits.haptic_strength, 0.0..=1.0)
+                                        .fixed_decimals(1),
+                                )
+                                .changed()
+                            {
+                                g.gbs_dirty = true;
+                            }
+                        });
+                    }),
+                ),
+                (
+                    "Accessibility",
+                    Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        ui.horizontal(|ui| {
+                            ui.label("UI transparency (0-1)");
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut g.gbs_edits.ui_transparency)
+                                        .desired_width(80.0),
+                                )
+                                .changed()
+                            {
+                                g.gbs_dirty = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Player list layout");
+                            if ui
+                                .add(egui::DragValue::new(&mut g.gbs_edits.player_list_layout).range(0..=1))
+                                .changed()
+                            {
+                                g.gbs_dirty = true;
+                            }
+                            ui.label("Text size");
+                            if ui
+                                .add(egui::DragValue::new(&mut g.gbs_edits.font_size).range(1..=4))
+                                .changed()
+                            {
+                                g.gbs_dirty = true;
+                            }
+                        });
+                        gbs_bool_row(ui, "Reduce motion", &mut g.gbs_edits.reduced_motion, &mut g.gbs_dirty);
+                        gbs_bool_row(ui, "Show performance stats", &mut g.gbs_edits.perf_stats, &mut g.gbs_dirty);
+                    }),
+                ),
+                (
+                    "Miscellaneous",
+                    Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        gbs_bool_row(ui, "Chat translation", &mut g.gbs_edits.chat_translation, &mut g.gbs_dirty);
+                        gbs_bool_row(ui, "Enable VR", &mut g.gbs_edits.vr, &mut g.gbs_dirty);
+                    }),
+                ),
+            ],
+        );
     }
 
     fn audio_slider_row(&mut self, ui: &mut egui::Ui, label: &str, field: &str) {
@@ -1346,33 +1455,56 @@ impl RuststrapApp {
     fn settings_page(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
         ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label("Channels");
-            ui.horizontal(|ui| {
-                ui.label("Player");
-                ui.text_edit_singleline(&mut self.settings_edits.player_channel);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Studio");
-                ui.text_edit_singleline(&mut self.settings_edits.studio_channel);
-            });
-            ui.label(format!("Default: {DEFAULT_CHANNEL}"));
-        });
-
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label("Behavior");
-            ui.checkbox(&mut self.settings_edits.update_roblox, "Update Roblox before launch");
-            ui.checkbox(&mut self.settings_edits.background_app, "Keep Roblox running in the background when closed");
-            ui.horizontal(|ui| {
-                ui.label("Parallel downloads");
-                ui.add(egui::Slider::new(&mut self.settings_edits.max_threads, 1..=32));
-            });
-            ui.horizontal(|ui| {
-                ui.label("Cleaner (days old, 0 = off)");
-                ui.add(egui::Slider::new(&mut self.settings_edits.cleaner_days, 0..=90));
-            });
-        });
+        tile_grid(
+            ui,
+            self,
+            vec![
+                (
+                    "Channels",
+                    Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        ui.horizontal(|ui| {
+                            ui.label("Player");
+                            g.settings_dirty |= ui
+                                .text_edit_singleline(&mut g.settings_edits.player_channel)
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Studio");
+                            g.settings_dirty |= ui
+                                .text_edit_singleline(&mut g.settings_edits.studio_channel)
+                                .changed();
+                        });
+                        ui.label(format!("Default: {DEFAULT_CHANNEL}"));
+                    }),
+                ),
+                (
+                    "Behavior",
+                    Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        g.settings_dirty |= ui
+                            .checkbox(&mut g.settings_edits.update_roblox, "Update Roblox before launch")
+                            .changed();
+                        g.settings_dirty |= ui
+                            .checkbox(
+                                &mut g.settings_edits.background_app,
+                                "Keep Roblox running in the background when closed",
+                            )
+                            .changed();
+                        ui.horizontal(|ui| {
+                            ui.label("Parallel downloads");
+                            g.settings_dirty |= ui
+                                .add(egui::Slider::new(&mut g.settings_edits.max_threads, 1..=32))
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Cleaner (days old, 0 = off)");
+                            g.settings_dirty |= ui
+                                .add(egui::Slider::new(&mut g.settings_edits.cleaner_days, 0..=90))
+                                .changed();
+                        });
+                    }),
+                ),
+            ],
+        );
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -1380,18 +1512,7 @@ impl RuststrapApp {
                 .add_sized(BUTTON_SIZE, egui::Button::new("Save settings"))
                 .clicked()
             {
-                let Ok(mut guard) = self.shared.lock() else {
-                    logger::error("State file lock unavailable; settings not saved");
-                    return;
-                };
-                guard.settings.player_channel = self.settings_edits.player_channel.trim().to_ascii_lowercase();
-                guard.settings.studio_channel = self.settings_edits.studio_channel.trim().to_ascii_lowercase();
-                guard.settings.update_roblox = self.settings_edits.update_roblox;
-                guard.settings.background_app = self.settings_edits.background_app;
-                guard.settings.max_thread_download = self.settings_edits.max_threads;
-                guard.settings.cleaner_days = self.settings_edits.cleaner_days;
-                guard.save_settings();
-                logger::info("Settings saved");
+                self.save_settings_edits();
             }
         });
 
@@ -1560,6 +1681,33 @@ fn parse_flags_json(text: &str) -> Option<(serde_json::Map<String, Value>, usize
     }
         _ => None,
     }
+}
+
+/// Lays out groups as equal-sized tiles, wrapping by the available width.
+/// Overlong tile content scrolls inside its own tile.
+fn tile_grid(ui: &mut egui::Ui, app: &mut RuststrapApp, tiles: Vec<(&'static str, TileBody)>) {
+    let [width, height] = TILE_SIZE;
+    let columns = ((ui.available_width() + TILE_GAP) / (width + TILE_GAP)).floor().max(1.0) as usize;
+    ui.vertical(|ui| {
+        for row in tiles.chunks(columns) {
+            ui.horizontal(|ui| {
+                for (title, body) in row {
+                    ui.allocate_ui(egui::vec2(width, height), |ui| {
+                        ui.group(|ui| {
+                            ui.set_min_size(egui::vec2(width - 16.0, height - 16.0));
+                            ui.strong(*title);
+                            egui::ScrollArea::vertical()
+                                .id_salt(format!("tile-{title}"))
+                                .auto_shrink([false, false])
+                                .max_height(height - 60.0)
+                                .show(ui, |ui| body(ui, app));
+                        });
+                    });
+                    ui.add_space(TILE_GAP);
+                }
+            });
+        }
+    });
 }
 
 fn open_folder(path: std::path::PathBuf) {
