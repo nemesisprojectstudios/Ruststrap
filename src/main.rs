@@ -95,7 +95,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 parsed.channel = Some(value.to_ascii_lowercase());
             }
             "--roblox-version" => {
-                parsed.version = Some(take_value(&mut inline_value, args, &mut i, "--roblox-version")?);
+                parsed.version = Some(take_value(
+                    &mut inline_value,
+                    args,
+                    &mut i,
+                    "--roblox-version",
+                )?);
             }
             "--force" => parsed.force = true,
             "--no-launch" => parsed.no_launch = true,
@@ -116,12 +121,17 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 if lower.starts_with("roblox-player:") || lower.starts_with("roblox:") {
                     parsed.mode = LaunchMode::Player;
                     parsed.payload = Some(target);
-                } else if lower.starts_with("roblox-studio-auth:") || lower.starts_with("roblox-studio:") {
+                } else if lower.starts_with("roblox-studio-auth:")
+                    || lower.starts_with("roblox-studio:")
+                {
                     parsed.mode = LaunchMode::Studio;
                     parsed.payload = Some(target);
                 } else if target.starts_with("version-") {
                     parsed.version = Some(target);
-                } else if STUDIO_FILE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext)) {
+                } else if STUDIO_FILE_EXTENSIONS
+                    .iter()
+                    .any(|ext| lower.ends_with(ext))
+                {
                     parsed.mode = LaunchMode::Studio;
                     parsed.payload = Some(format!("-task EditFile -localPlaceFile \"{target}\""));
                 } else {
@@ -151,7 +161,12 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     Ok(parsed)
 }
 
-fn take_value(inline: &mut Option<String>, args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
+fn take_value(
+    inline: &mut Option<String>,
+    args: &[String],
+    i: &mut usize,
+    flag: &str,
+) -> Result<String, String> {
     if let Some(value) = inline.take() {
         return Ok(value);
     }
@@ -212,7 +227,10 @@ fn main() {
     let paths = paths::init();
     let log_path = paths.logs.join("Ruststrap.log");
     logger::init(log_path);
-    info(&format!("Log file: {}", paths.logs.join("Ruststrap.log").display()));
+    info(&format!(
+        "Log file: {}",
+        paths.logs.join("Ruststrap.log").display()
+    ));
 
     // a GUI panic would otherwise vanish with the window; record it
     std::panic::set_hook(Box::new(|info| {

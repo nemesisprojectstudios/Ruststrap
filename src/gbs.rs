@@ -69,7 +69,11 @@ impl Gbs {
     }
 
     pub fn get_float(&self, name: &str) -> Option<f64> {
-        self.get("float", name)?.trim().replace(',', ".").parse().ok()
+        self.get("float", name)?
+            .trim()
+            .replace(',', ".")
+            .parse()
+            .ok()
     }
 
     /// Component of a Vector2 child element.
@@ -94,10 +98,10 @@ impl Gbs {
         if let Some(pos) = self.raw.find(&open) {
             let start = pos + open.len();
             let close = format!("</{kind}>");
-            let end = start + self
-                .raw[start..]
-                .find(&close)
-                .ok_or_else(|| format!("unclosed element {kind} {name}"))?;
+            let end = start
+                + self.raw[start..]
+                    .find(&close)
+                    .ok_or_else(|| format!("unclosed element {kind} {name}"))?;
             self.raw.replace_range(start..end, value);
             return Ok(());
         }
@@ -131,9 +135,7 @@ impl Gbs {
             .raw
             .find("</Properties>")
             .ok_or("document has no UserGameSettings Properties block")?;
-        let element = format!(
-            "\r\n      <Vector2 name=\"{name}\"><X>0</X><Y>0</Y></Vector2>"
-        );
+        let element = format!("\r\n      <Vector2 name=\"{name}\"><X>0</X><Y>0</Y></Vector2>");
         self.raw.insert_str(props_end, &element);
         Ok(())
     }
@@ -145,19 +147,20 @@ impl Gbs {
             .find(&open)
             .ok_or_else(|| format!("Vector2 {name} not found"))?;
         let start = pos + open.len();
-        let end = start + self
-            .raw[start..]
-            .find("</Vector2>")
-            .ok_or_else(|| format!("unclosed Vector2 {name}"))?;
+        let end = start
+            + self.raw[start..]
+                .find("</Vector2>")
+                .ok_or_else(|| format!("unclosed Vector2 {name}"))?;
         let axis_open = format!("<{axis}>");
         let axis_close = format!("</{axis}>");
         let axis_pos = self.raw[start..end]
             .find(&axis_open)
             .ok_or_else(|| format!("Vector2 {name} has no {axis}"))?;
         let axis_start = start + axis_pos + axis_open.len();
-        let axis_end = axis_start + self.raw[axis_start..end]
-            .find(&axis_close)
-            .ok_or_else(|| format!("Vector2 {name} has unclosed {axis}"))?;
+        let axis_end = axis_start
+            + self.raw[axis_start..end]
+                .find(&axis_close)
+                .ok_or_else(|| format!("Vector2 {name} has unclosed {axis}"))?;
         self.raw.replace_range(axis_start..axis_end, value);
         Ok(())
     }
@@ -180,10 +183,13 @@ impl Gbs {
 
     /// Imports a UserGameSettings XML from `path`, replacing the current file.
     pub fn import(path: &Path) -> Result<(), String> {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         if !contents.contains("<Item class=\"UserGameSettings\">") {
-            return Err(format!("{} is not a UserGameSettings document", path.display()));
+            return Err(format!(
+                "{} is not a UserGameSettings document",
+                path.display()
+            ));
         }
         let dest = file_location(paths::get());
         if let Some(dir) = dest.parent() {
@@ -258,7 +264,10 @@ mod tests {
         let g = doc();
         assert_eq!(g.get("bool", "Fullscreen").as_deref(), Some("true"));
         assert_eq!(g.get_float("MasterVolume"), Some(1.0));
-        assert_eq!(g.get_vector("MouseSensitivityFirstPerson", "X").as_deref(), Some("1"));
+        assert_eq!(
+            g.get_vector("MouseSensitivityFirstPerson", "X").as_deref(),
+            Some("1")
+        );
         assert_eq!(g.get("bool", "Missing"), None);
     }
 
@@ -276,8 +285,15 @@ mod tests {
     fn ensure_vector_then_update_axis() {
         let mut g = doc();
         g.ensure_vector("MouseSensitivityThirdPerson").unwrap();
-        g.set_vector("MouseSensitivityThirdPerson", "Y", "2.5").unwrap();
-        assert_eq!(g.get_vector("MouseSensitivityThirdPerson", "Y").as_deref(), Some("2.5"));
-        assert_eq!(g.get_vector("MouseSensitivityThirdPerson", "X").as_deref(), Some("0"));
+        g.set_vector("MouseSensitivityThirdPerson", "Y", "2.5")
+            .unwrap();
+        assert_eq!(
+            g.get_vector("MouseSensitivityThirdPerson", "Y").as_deref(),
+            Some("2.5")
+        );
+        assert_eq!(
+            g.get_vector("MouseSensitivityThirdPerson", "X").as_deref(),
+            Some("0")
+        );
     }
 }

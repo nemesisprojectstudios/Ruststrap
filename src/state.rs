@@ -73,7 +73,10 @@ pub fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
         Ok(contents) => match serde_json::from_str(&contents) {
             Ok(value) => value,
             Err(e) => {
-                logger::error(&format!("Failed to parse {}: {e}; using defaults", path.display()));
+                logger::error(&format!(
+                    "Failed to parse {}: {e}; using defaults",
+                    path.display()
+                ));
                 T::default()
             }
         },
@@ -83,7 +86,10 @@ pub fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
 
 pub fn save<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     if !path.is_absolute() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path must be absolute"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path must be absolute",
+        ));
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -215,7 +221,9 @@ mod tests {
             version_guid: "version-abc123".to_string(),
             ..Default::default()
         };
-        state.package_hashes.insert("RobloxApp.zip".into(), "AAAA".into());
+        state
+            .package_hashes
+            .insert("RobloxApp.zip".into(), "AAAA".into());
         let back: DistributionState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(back.package_hashes["RobloxApp.zip"], "AAAA");

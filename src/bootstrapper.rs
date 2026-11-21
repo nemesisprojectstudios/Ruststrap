@@ -7,8 +7,8 @@ use crate::http::Http;
 use crate::launch;
 use crate::lock::FileLock;
 use crate::logger;
-use crate::paths::{self, Paths, DEFAULT_CHANNEL};
 use crate::packages::{self};
+use crate::paths::{self, Paths, DEFAULT_CHANNEL};
 use crate::progress;
 use crate::sober;
 use crate::state::Ctx;
@@ -114,10 +114,19 @@ impl<'a> Bootstrapper<'a> {
         logger::info(&format!("Using binary type {binary}"));
 
         let outdated = self.ctx.distribution_state(is_studio).version_guid != version_guid;
-        let needs = packages::must_upgrade(self.paths, self.ctx, is_studio, version_guid, self.force);
+        let needs =
+            packages::must_upgrade(self.paths, self.ctx, is_studio, version_guid, self.force);
 
         if outdated || needs {
-            packages::upgrade(self.http, self.paths, self.ctx, is_studio, channel, &base_url, version_guid)?;
+            packages::upgrade(
+                self.http,
+                self.paths,
+                self.ctx,
+                is_studio,
+                channel,
+                &base_url,
+                version_guid,
+            )?;
         } else {
             logger::info("Roblox is up to date");
         }
@@ -128,7 +137,8 @@ impl<'a> Bootstrapper<'a> {
 
         #[cfg(windows)]
         {
-            let exe = std::env::current_exe().map_err(|e| format!("cannot resolve executable: {e}"))?;
+            let exe =
+                std::env::current_exe().map_err(|e| format!("cannot resolve executable: {e}"))?;
             if is_studio {
                 crate::registry::register_studio(&exe);
             } else {
@@ -155,7 +165,8 @@ impl<'a> Bootstrapper<'a> {
         }
 
         progress::set("Launching Roblox");
-        let Some(mut child) = launch::launch(self.paths, is_studio, &dir, &self.launch_args)? else {
+        let Some(mut child) = launch::launch(self.paths, is_studio, &dir, &self.launch_args)?
+        else {
             return Ok(());
         };
 
@@ -238,8 +249,13 @@ impl<'a> Bootstrapper<'a> {
                     self.ctx.settings.player_channel = DEFAULT_CHANNEL.to_string();
                 }
                 self.ctx.save_settings();
-                deployment::get_client_version(self.http, &self.ctx.settings, DEFAULT_CHANNEL, binary)
-                    .map_err(|e| format!("{e}"))
+                deployment::get_client_version(
+                    self.http,
+                    &self.ctx.settings,
+                    DEFAULT_CHANNEL,
+                    binary,
+                )
+                .map_err(|e| format!("{e}"))
             }
             Err(ChannelError::Network(e)) => Err(format!("Failed to get deployment info: {e}")),
         }

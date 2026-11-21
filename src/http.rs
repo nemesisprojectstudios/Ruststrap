@@ -87,15 +87,12 @@ impl Http {
     }
 
     fn try_download(&self, url: &str, dest: &Path, expected: Option<&str>) -> Result<(), String> {
-        let response = self
-            .agent
-            .get(url)
-            .call()
-            .map_err(|e| format!("{e}"))?;
+        let response = self.agent.get(url).call().map_err(|e| format!("{e}"))?;
 
         let mut reader = response.into_reader();
         let mut hasher = Md5::new();
-        let mut file = std::fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+        let mut file =
+            std::fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
         let mut buf = [0u8; 128 * 1024];
         let mut total = 0usize;
         loop {
@@ -164,6 +161,9 @@ mod tests {
     fn md5_reference_vector() {
         let mut hasher = Md5::new();
         hasher.update(b"abc");
-        assert_eq!(to_hex(&hasher.finalize()), "900150983CD24FB0D6963F7D28E17F72");
+        assert_eq!(
+            to_hex(&hasher.finalize()),
+            "900150983CD24FB0D6963F7D28E17F72"
+        );
     }
 }

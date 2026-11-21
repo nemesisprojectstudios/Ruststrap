@@ -52,7 +52,6 @@ pub enum LaunchModeKind {
     Edit,
 }
 
-
 /// Parses `roblox-player:` URIs. Values are extracted between known key markers
 /// rather than split on `+`, because values may contain literal plus signs.
 pub fn parse_player_uri(uri: &str) -> Option<LaunchCommand> {
@@ -209,7 +208,10 @@ pub fn game_shortcut_to_deeplink(data: &str) -> Option<String> {
     if place_id.is_empty() {
         return None;
     }
-    let mut deeplink = format!("roblox://experiences/start?placeId={}", percent_encode(place_id));
+    let mut deeplink = format!(
+        "roblox://experiences/start?placeId={}",
+        percent_encode(place_id)
+    );
     let job_id = parts.next().map(str::trim).filter(|v| !v.is_empty());
     let access_code = parts.next().map(str::trim).filter(|v| !v.is_empty());
     if let Some(access_code) = access_code {
@@ -291,7 +293,12 @@ mod tests {
         let uri = "roblox-player:1+launchmode:play+gameinfo:eyJwbGFjZUlkIjoxMjM0NTZ9abc+def+placelauncherurl:https%3a%2f%2fwww.roblox.com%2fGame%2fPlaceLauncher.ashx%3frequest%3dRequestGame%26placeId%3d7+time:1";
         let cmd = parse_player_uri(uri).unwrap();
         assert_eq!(cmd.mode, LaunchModeKind::Play);
-        assert_eq!(cmd.placelauncher_url.as_deref().map(|u| u.ends_with("placeId=7")), Some(true));
+        assert_eq!(
+            cmd.placelauncher_url
+                .as_deref()
+                .map(|u| u.ends_with("placeId=7")),
+            Some(true)
+        );
     }
 
     #[test]
@@ -314,7 +321,10 @@ mod tests {
     #[test]
     fn parses_private_game_job() {
         let url = "https://www.roblox.com/Game/PlaceLauncher.ashx?request=RequestGameJob&placeId=42&gameId=job-77";
-        let cmd = format!("roblox-player:1+launchmode:play+placelauncherurl:{}", percent_encode(url));
+        let cmd = format!(
+            "roblox-player:1+launchmode:play+placelauncherurl:{}",
+            percent_encode(url)
+        );
         let data = get_join_data(&cmd);
         assert_eq!(data.join_type, JoinType::RequestGameJob);
         assert_eq!(data.place_id, Some(42));

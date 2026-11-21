@@ -43,7 +43,9 @@ pub fn clean_now(paths: &Paths, days: u32) {
             continue;
         }
         let deleted = clean_dir(&dir, cutoff, 2000);
-        logger::info(&format!("Cleaner removed {deleted} old file(s) from {name}"));
+        logger::info(&format!(
+            "Cleaner removed {deleted} old file(s) from {name}"
+        ));
     }
 }
 

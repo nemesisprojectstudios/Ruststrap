@@ -47,7 +47,9 @@ fn launch_studio_via_wine(
     version_dir: &Path,
     launch_args: &str,
 ) -> Result<Option<Child>, String> {
-    let wine = which_wine().ok_or_else(|| "Wine is required to run Roblox Studio on Linux; install wine and try again".to_string())?;
+    let wine = which_wine().ok_or_else(|| {
+        "Wine is required to run Roblox Studio on Linux; install wine and try again".to_string()
+    })?;
 
     let prefix = paths.data_root.join("Wine").join("prefixes").join("studio");
     if !prefix.join("drive_c/windows").exists() {

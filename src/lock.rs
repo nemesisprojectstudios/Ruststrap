@@ -43,7 +43,12 @@ impl FileLock {
             if let Ok(meta) = std::fs::metadata(dir.join(format!("{name}.lock"))) {
                 if meta
                     .modified()
-                    .map(|modified| SystemTime::now().duration_since(modified).unwrap_or_default() > STALE_AFTER)
+                    .map(|modified| {
+                        SystemTime::now()
+                            .duration_since(modified)
+                            .unwrap_or_default()
+                            > STALE_AFTER
+                    })
                     .unwrap_or(false)
                 {
                     logger::warn(&format!("Reclaiming stale {name} lock"));

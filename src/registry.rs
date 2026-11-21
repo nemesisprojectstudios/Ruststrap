@@ -27,8 +27,12 @@ fn register_protocol(handler: &std::path::Path, key: &str, name: &str, args: &st
     }
 
     let command = format!("\"{handler_str}\" {args}");
-    let Ok((icon, _)) = root.create_subkey("DefaultIcon") else { return };
-    let Ok((command_key, _)) = root.create_subkey(r"shell\open\command") else { return };
+    let Ok((icon, _)) = root.create_subkey("DefaultIcon") else {
+        return;
+    };
+    let Ok((command_key, _)) = root.create_subkey(r"shell\open\command") else {
+        return;
+    };
     if command_key.get_value::<String, _>("").ok().as_deref() != Some(command.as_str()) {
         let _ = icon.set_value("", &handler_str);
         let _ = command_key.set_value("", &command);
@@ -44,14 +48,16 @@ pub fn register_player(executable: &std::path::Path) {
 #[cfg(windows)]
 pub fn register_studio(executable: &std::path::Path) {
     register_protocol(executable, "roblox-studio", "Roblox", r#"--studio "%1""#);
-    register_protocol(executable, "roblox-studio-auth", "Roblox", r#"--studio "%1""#);
+    register_protocol(
+        executable,
+        "roblox-studio-auth",
+        "Roblox",
+        r#"--studio "%1""#,
+    );
 
     for ext in [".rbxl", ".rbxlx", ".rbxm", ".rbxmx"] {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let Ok((key, _)) = hkcu
-            .create_subkey(format!(r"{CLASSES_ROOT}\{ext}"))
-            
-        else {
+        let Ok((key, _)) = hkcu.create_subkey(format!(r"{CLASSES_ROOT}\{ext}")) else {
             continue;
         };
         let _ = key.create_subkey(r"Roblox.Place\ShellNew");
@@ -78,18 +84,25 @@ pub fn register_client_location(is_studio: bool, client_path: &str) {
     let Ok((key, _)) = hkcu.create_subkey(r"Software\Ruststrap") else {
         return;
     };
-    let name = if is_studio { "StudioPath" } else { "PlayerPath" };
+    let name = if is_studio {
+        "StudioPath"
+    } else {
+        "PlayerPath"
+    };
     let _ = key.set_value(name, &client_path);
 }
 
 #[cfg(windows)]
 pub fn sync_channel(is_studio: bool, domain: &str, channel: &str, is_default: bool) {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let registry_name = if is_studio { "RobloxStudio" } else { "RobloxPlayer" };
-    let Ok((key, _)) = hkcu
-        .create_subkey(format!(r"Software\ROBLOX Corporation\Environments\{registry_name}\Channel"))
-        
-    else {
+    let registry_name = if is_studio {
+        "RobloxStudio"
+    } else {
+        "RobloxPlayer"
+    };
+    let Ok((key, _)) = hkcu.create_subkey(format!(
+        r"Software\ROBLOX Corporation\Environments\{registry_name}\Channel"
+    )) else {
         return;
     };
     let value = if is_default { "" } else { channel };
@@ -99,7 +112,12 @@ pub fn sync_channel(is_studio: bool, domain: &str, channel: &str, is_default: bo
 #[cfg(windows)]
 pub fn unregister_all() {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    for key in ["roblox", "roblox-player", "roblox-studio", "roblox-studio-auth"] {
+    for key in [
+        "roblox",
+        "roblox-player",
+        "roblox-studio",
+        "roblox-studio-auth",
+    ] {
         let _ = hkcu.delete_subkey_all(format!(r"{CLASSES_ROOT}\{key}"));
     }
 }

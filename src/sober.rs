@@ -37,7 +37,9 @@ pub fn ensure_installed() -> Result<(), String> {
     match flatpak_ok(&["--version"]) {
         Ok(true) => {}
         Ok(false) => return Err("Flatpak is broken or misconfigured".to_string()),
-        Err(_) => return Err("Flatpak is required on Linux; install Flatpak and try again".to_string()),
+        Err(_) => {
+            return Err("Flatpak is required on Linux; install Flatpak and try again".to_string())
+        }
     }
 
     if is_installed() {
@@ -225,8 +227,8 @@ pub fn save_config(paths: &Paths, config: &Map<String, Value>) -> Result<(), Str
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
-    let contents = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("serialize Sober config: {e}"))?;
+    let contents =
+        serde_json::to_string_pretty(config).map_err(|e| format!("serialize Sober config: {e}"))?;
     std::fs::write(&path, contents).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
@@ -258,7 +260,9 @@ pub fn launch(launch_uri: &str) -> Result<std::process::Child, String> {
     } else {
         let data = crate::gamejoin::get_join_data(launch_uri);
         crate::gamejoin::build_sober_uri(&data).ok_or_else(|| {
-            format!("cannot launch Sober: could not extract a joinable experience from {launch_uri}")
+            format!(
+                "cannot launch Sober: could not extract a joinable experience from {launch_uri}"
+            )
         })?
     };
 
@@ -286,10 +290,7 @@ mod tests {
             "dpi": "2",
         }"#;
         let config = parse_config(text).expect("lenient parse");
-        assert_eq!(
-            config["fflags"]["FFlagExample"],
-            json!("True")
-        );
+        assert_eq!(config["fflags"]["FFlagExample"], json!("True"));
         assert_eq!(config["dpi"], json!("2"));
     }
 

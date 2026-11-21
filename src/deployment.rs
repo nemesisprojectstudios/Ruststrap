@@ -72,7 +72,11 @@ pub fn location(base_url: &str, channel: &str, resource: &str) -> String {
 }
 
 fn clientsettings_url(domain: &str, binary_type: &str, channel: &str, cdn: bool) -> String {
-    let service = if cdn { "clientsettingscdn" } else { "clientsettings" };
+    let service = if cdn {
+        "clientsettingscdn"
+    } else {
+        "clientsettings"
+    };
     let path = if is_default_channel(channel) {
         format!("v2/client-version/{binary_type}")
     } else {
@@ -90,7 +94,9 @@ pub fn get_client_version(
     binary_type: &str,
 ) -> Result<ClientVersion, ChannelError> {
     let is_default = is_default_channel(channel);
-    logger::info(&format!("Getting deploy info for channel {channel} ({binary_type})"));
+    logger::info(&format!(
+        "Getting deploy info for channel {channel} ({binary_type})"
+    ));
 
     for cdn in [true, false] {
         let url = clientsettings_url(&settings.roblox_domain, binary_type, channel, cdn);
@@ -110,7 +116,9 @@ pub fn get_client_version(
                     }
                 }
                 if cdn {
-                    logger::warn(&format!("Failed to contact clientsettingscdn ({e}), falling back to clientsettings"));
+                    logger::warn(&format!(
+                        "Failed to contact clientsettingscdn ({e}), falling back to clientsettings"
+                    ));
                 } else {
                     return Err(ChannelError::Network(e));
                 }
@@ -139,7 +147,6 @@ pub fn channel_from_launch_args(launch_args: &str) -> Option<String> {
     None
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,7 +157,10 @@ mod tests {
             channel_from_launch_args("roblox-player:1+launchmode:play+channel:zcontrol"),
             Some("zcontrol".to_string())
         );
-        assert_eq!(channel_from_launch_args("roblox-player:1+launchmode:play"), None);
+        assert_eq!(
+            channel_from_launch_args("roblox-player:1+launchmode:play"),
+            None
+        );
         assert_eq!(channel_from_launch_args(""), None);
     }
 
@@ -164,7 +174,11 @@ mod tests {
     #[test]
     fn location_channel_prefix() {
         assert_eq!(
-            location("https://setup.rbxcdn.com", "production", "/x-rbxPkgManifest.txt"),
+            location(
+                "https://setup.rbxcdn.com",
+                "production",
+                "/x-rbxPkgManifest.txt"
+            ),
             "https://setup.rbxcdn.com/x-rbxPkgManifest.txt"
         );
         assert_eq!(

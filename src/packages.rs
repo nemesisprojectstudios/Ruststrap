@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use crate::deployment;
 use crate::http::{fast_hash_file, Http};
 use crate::logger;
-use crate::manifest::{copy_dir_overwrite, extract_zip, package_map, parse_manifest, remove_dir_forced, Package};
+use crate::manifest::{
+    copy_dir_overwrite, extract_zip, package_map, parse_manifest, remove_dir_forced, Package,
+};
 use crate::paths::Paths;
 use crate::state::{load, Ctx, DistributionState, Settings};
 use crate::{fastflags, processes};
@@ -46,7 +48,13 @@ pub fn is_installed(version_dir: &Path, is_studio: bool) -> bool {
 }
 
 /// Everything that invalidates an existing install and forces a clean one.
-pub fn must_upgrade(paths: &Paths, ctx: &Ctx, is_studio: bool, version_guid: &str, force: bool) -> bool {
+pub fn must_upgrade(
+    paths: &Paths,
+    ctx: &Ctx,
+    is_studio: bool,
+    version_guid: &str,
+    force: bool,
+) -> bool {
     if force || ctx.state.force_reinstall {
         return true;
     }
@@ -56,7 +64,9 @@ pub fn must_upgrade(paths: &Paths, ctx: &Ctx, is_studio: bool, version_guid: &st
     }
     // Roblox's Miraculous "WebView2 is mandatory" era: an incomplete extraction
     // of these two files means the client cannot start.
-    cfg!(windows) && !is_studio && (!dir.join("WebView2Loader.dll").exists() || !dir.join("RobloxPlayerBeta.dll").exists())
+    cfg!(windows)
+        && !is_studio
+        && (!dir.join("WebView2Loader.dll").exists() || !dir.join("RobloxPlayerBeta.dll").exists())
 }
 
 /// Full package install/upgrade flow (Windows player/studio, Linux studio).
@@ -71,7 +81,10 @@ pub fn upgrade(
 ) -> Result<(), String> {
     if !ctx.settings.update_roblox {
         logger::info("Upgrading disabled, cancelling the upgrade");
-        if !is_installed(&version_directory(paths, is_studio, version_guid), is_studio) {
+        if !is_installed(
+            &version_directory(paths, is_studio, version_guid),
+            is_studio,
+        ) {
             return Err("UpdateRoblox is disabled and no client is installed".to_string());
         }
         return Ok(());
@@ -114,7 +127,10 @@ pub fn upgrade(
         ))
         .map_err(|e| format!("Failed to download package manifest: {e}"))?;
     let packages = parse_manifest(&manifest_text)?;
-    logger::info(&format!("Fetched package manifest ({} packages)", packages.len()));
+    logger::info(&format!(
+        "Fetched package manifest ({} packages)",
+        packages.len()
+    ));
 
     let dir_map = Arc::new(package_map(is_studio));
     let target = Arc::new(target);
@@ -126,11 +142,7 @@ pub fn upgrade(
     let queue = Arc::new(Mutex::new(queue));
     let failed_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let finished_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    crate::progress::set_counted(
-        "Downloading packages",
-        0,
-        packages.len() as u64,
-    );
+    crate::progress::set_counted("Downloading packages", 0, packages.len() as u64);
     let failures: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let worker_count = ctx
         .settings
@@ -148,32 +160,36 @@ pub fn upgrade(
             let finished_count = finished_count.clone();
             scope.spawn(move || {
                 while let Some(pkg) = queue.lock().ok().and_then(|mut q| q.pop()) {
+                    let result = (|| -> Result<(), String> {
+                        let download_path =
+                            download_package(http, paths, &pkg, base_url, channel, version_guid)?;
+                        let Some(&dir) = dir_map.get(pkg.name.as_str()) else {
+                            logger::warn(&format!(
+                                "{} not found in package map, skipping",
+                                pkg.name
+                            ));
+                            return Ok(());
+                        };
+                        let target_dir = target.join(dir);
+                        let _ = std::fs::create_dir_all(&target_dir);
+                        extract_zip(&download_path, &target_dir)?;
+                        Ok(())
+                    })();
 
-                let result = (|| -> Result<(), String> {
-                    let download_path = download_package(http, paths, &pkg, base_url, channel, version_guid)?;
-                    let Some(&dir) = dir_map.get(pkg.name.as_str()) else {
-                        logger::warn(&format!("{} not found in package map, skipping", pkg.name));
-                        return Ok(());
-                    };
-                    let target_dir = target.join(dir);
-                    let _ = std::fs::create_dir_all(&target_dir);
-                    extract_zip(&download_path, &target_dir)?;
-                    Ok(())
-                })();
-
-                match result {
-                    Ok(()) => logger::info(&format!("Package ready: {}", pkg.name)),
-                    Err(e) => {
-                        logger::error(&format!("Failed to install {}: {e}", pkg.name));
-                        if let Ok(mut list) = failures.lock() {
-                            list.push(format!("{}: {e}", pkg.name));
+                    match result {
+                        Ok(()) => logger::info(&format!("Package ready: {}", pkg.name)),
+                        Err(e) => {
+                            logger::error(&format!("Failed to install {}: {e}", pkg.name));
+                            if let Ok(mut list) = failures.lock() {
+                                list.push(format!("{}: {e}", pkg.name));
+                            }
+                            failed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
-                        failed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                }
-                let done = finished_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                let remaining = queue.lock().ok().map(|q| q.len()).unwrap_or(0) as u64;
-                crate::progress::set_counted("Downloading packages", done, done + remaining);
+                    let done =
+                        finished_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let remaining = queue.lock().ok().map(|q| q.len()).unwrap_or(0) as u64;
+                    crate::progress::set_counted("Downloading packages", done, done + remaining);
                 }
             });
         }
@@ -221,7 +237,10 @@ fn download_package(
                 return Ok(download_path);
             }
             _ => {
-                logger::warn(&format!("Cached package {} is corrupted, deleting", pkg.signature));
+                logger::warn(&format!(
+                    "Cached package {} is corrupted, deleting",
+                    pkg.signature
+                ));
                 let _ = std::fs::remove_file(&download_path);
             }
         }
@@ -273,7 +292,12 @@ pub fn uninstall(paths: &Paths, ctx: &mut Ctx) -> Result<(), String> {
 /// Removes version directories that neither distribution references anymore.
 fn cleanup_versions(paths: &Paths, ctx: &Ctx, current_guid: &str) {
     let keep: Vec<&str> = if cfg!(windows) {
-        vec![current_guid, "WindowsPlayer", "WindowsStudio64", SOBER_DIR_NAME]
+        vec![
+            current_guid,
+            "WindowsPlayer",
+            "WindowsStudio64",
+            SOBER_DIR_NAME,
+        ]
     } else {
         vec![current_guid, "WindowsStudio64", SOBER_DIR_NAME]
     };
@@ -285,7 +309,8 @@ fn cleanup_versions(paths: &Paths, ctx: &Ctx, current_guid: &str) {
         if keep.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
             continue;
         }
-        let referenced = ctx.player_state.version_guid == name || ctx.studio_state.version_guid == name;
+        let referenced =
+            ctx.player_state.version_guid == name || ctx.studio_state.version_guid == name;
         if referenced || !entry.path().is_dir() {
             continue;
         }

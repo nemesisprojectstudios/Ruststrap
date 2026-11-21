@@ -62,9 +62,9 @@ pub fn apply_to_version_dir(paths: &Paths, version_dir: &Path) {
         return;
     }
     let dest_dir = version_dir.join("ClientSettings");
-    if let Err(e) = std::fs::create_dir_all(&dest_dir).and_then(|()| {
-        std::fs::copy(&source, dest_dir.join("ClientAppSettings.json")).map(|_| ())
-    }) {
+    if let Err(e) = std::fs::create_dir_all(&dest_dir)
+        .and_then(|()| std::fs::copy(&source, dest_dir.join("ClientAppSettings.json")).map(|_| ()))
+    {
         logger::error(&format!("Failed to install fast flags: {e}"));
     }
 }
@@ -97,10 +97,10 @@ mod tests {
         assert_eq!(coerce_flag("True"), Value::Bool(true));
         assert_eq!(coerce_flag("false"), Value::Bool(false));
         assert_eq!(coerce_flag("120"), Value::Number(120.into()));
-        assert_eq!(coerce_flag("1.5"), serde_json::from_str::<Value>("1.5").unwrap());
         assert_eq!(
-            coerce_flag("level8"),
-            Value::String("level8".to_string())
+            coerce_flag("1.5"),
+            serde_json::from_str::<Value>("1.5").unwrap()
         );
+        assert_eq!(coerce_flag("level8"), Value::String("level8".to_string()));
     }
 }

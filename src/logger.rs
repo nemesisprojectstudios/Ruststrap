@@ -53,8 +53,7 @@ pub fn log(level: &str, msg: &str) {
 
 /// Snapshot of the log ring buffer for the UI.
 pub fn recent() -> Vec<String> {
-    RING
-        .get()
+    RING.get()
         .and_then(|m| m.lock().ok())
         .map(|ring| ring.iter().cloned().collect())
         .unwrap_or_default()

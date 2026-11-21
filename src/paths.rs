@@ -68,7 +68,14 @@ pub fn init() -> &'static Paths {
         let versions = data_root.join("Versions");
         let modifications = config_root.join("Modifications");
 
-        for dir in [&config_root, &data_root, &downloads, &versions, &modifications, &logs] {
+        for dir in [
+            &config_root,
+            &data_root,
+            &downloads,
+            &versions,
+            &modifications,
+            &logs,
+        ] {
             let _ = std::fs::create_dir_all(dir);
         }
 

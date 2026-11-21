@@ -46,8 +46,11 @@ pub fn snapshot() -> Option<Progress> {
 mod tests {
     use super::*;
 
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn set_and_clear() {
+        let _guard = TEST_LOCK.lock();
         set_counted("Downloading", 2, 9);
         let snap = snapshot().unwrap();
         assert_eq!(snap.stage, "Downloading");
@@ -58,6 +61,7 @@ mod tests {
 
     #[test]
     fn set_overwrites() {
+        let _guard = TEST_LOCK.lock();
         set("stage-a");
         set("stage-b");
         assert_eq!(snapshot().unwrap().stage, "stage-b");

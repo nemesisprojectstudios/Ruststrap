@@ -7,7 +7,9 @@ use std::process::{Command, Stdio};
 use crate::logger;
 
 fn run_quiet(cmd: &mut Command) -> bool {
-    cmd.stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
     match cmd.status() {
         Ok(status) => status.success(),
         Err(_) => false,

@@ -23,7 +23,9 @@ pub fn parse_manifest(data: &str) -> Result<Vec<Package>, String> {
 
     let header = lines.next().unwrap_or("");
     if header != "v0" {
-        return Err(format!("unexpected package manifest version: {header} (expected v0)"));
+        return Err(format!(
+            "unexpected package manifest version: {header} (expected v0)"
+        ));
     }
 
     let mut packages = Vec::new();
@@ -81,7 +83,10 @@ pub fn package_map(is_studio: bool) -> HashMap<&'static str, &'static str> {
         map.extend([
             ("RobloxStudio.zip", ""),
             ("LibrariesQt5.zip", ""),
-            ("content-studio_svg_textures.zip", "content/studio_svg_textures"),
+            (
+                "content-studio_svg_textures.zip",
+                "content/studio_svg_textures",
+            ),
             ("content-qt_translations.zip", "content/qt_translations"),
             ("content-api-docs.zip", "content/api_docs"),
             ("extracontent-scripts.zip", "ExtraContent/scripts"),
@@ -118,7 +123,10 @@ pub fn sanitize_zip_path(name: &str) -> Option<PathBuf> {
 }
 
 /// Extracts `archive` into `target_dir`, overwriting existing files.
-pub fn extract_zip(archive_path: &std::path::Path, target_dir: &std::path::Path) -> Result<(), String> {
+pub fn extract_zip(
+    archive_path: &std::path::Path,
+    target_dir: &std::path::Path,
+) -> Result<(), String> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| format!("{}: {e}", archive_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
@@ -144,10 +152,7 @@ pub fn extract_zip(archive_path: &std::path::Path, target_dir: &std::path::Path)
         {
             use std::os::unix::fs::PermissionsExt;
             if let Some(mode) = entry.unix_mode() {
-                let _ = std::fs::set_permissions(
-                    &out_path,
-                    std::fs::Permissions::from_mode(mode),
-                );
+                let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
             }
         }
     }

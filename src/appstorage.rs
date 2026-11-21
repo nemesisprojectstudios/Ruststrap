@@ -25,7 +25,11 @@ fn app_storage_path(paths: &Paths) -> PathBuf {
 pub fn apply(paths: &Paths, settings: &crate::state::Settings) {
     let path = app_storage_path(paths);
     mutate(&path, |storage| {
-        let background = if settings.background_app { "true" } else { "false" };
+        let background = if settings.background_app {
+            "true"
+        } else {
+            "false"
+        };
         // values in this file are strings, not booleans
         storage.insert("LaunchAtStartup".into(), Value::String(background.into()));
         storage.insert("MinimizeToTray".into(), Value::String(background.into()));
@@ -67,11 +71,17 @@ fn mutate(path: &Path, f: impl FnOnce(&mut Map<String, Value>)) {
         Ok(contents) => match serde_json::from_str(&contents) {
             Ok(Value::Object(map)) => map,
             Ok(_) => {
-                logger::error(&format!("{} has unexpected contents, leaving it untouched", path.display()));
+                logger::error(&format!(
+                    "{} has unexpected contents, leaving it untouched",
+                    path.display()
+                ));
                 return;
             }
             Err(e) => {
-                logger::error(&format!("Failed to parse {}: {e}; leaving it untouched", path.display()));
+                logger::error(&format!(
+                    "Failed to parse {}: {e}; leaving it untouched",
+                    path.display()
+                ));
                 return;
             }
         },
@@ -108,7 +118,8 @@ mod tests {
         );
         apply_theme(&mut storage, "light");
         assert_eq!(storage["AuthenticatedTheme"], Value::String("light".into()));
-        let map: Map<String, Value> = serde_json::from_str(storage["DeviceLevelTheme"].as_str().unwrap()).unwrap();
+        let map: Map<String, Value> =
+            serde_json::from_str(storage["DeviceLevelTheme"].as_str().unwrap()).unwrap();
         assert_eq!(map["42"], Value::String("dark".into()));
         assert_eq!(map["321"], Value::String("light".into()));
     }

@@ -34,7 +34,10 @@ enum Page {
 }
 
 enum WorkerMsg {
-    Versions { player: Option<String>, studio: Option<String> },
+    Versions {
+        player: Option<String>,
+        studio: Option<String>,
+    },
     SoberInstalled(bool),
     FilePicked(FilePickTarget, Option<std::path::PathBuf>),
 }
@@ -138,7 +141,10 @@ const SOBER_TOGGLES: [(&str, &str); 11] = [
     ("Use console experience", "use_console_experience"),
     ("Use libsecret", "use_libsecret"),
     ("Use OpenGL", "use_opengl"),
-    ("Server location indicator", "server_location_indicator_enabled"),
+    (
+        "Server location indicator",
+        "server_location_indicator_enabled",
+    ),
     ("Discord RPC", "discord_rpc_enabled"),
     ("Discord RPC join button", "discord_rpc_show_join_button"),
     ("Close on leave", "close_on_leave"),
@@ -400,10 +406,7 @@ impl RuststrapApp {
                         self.dialog_error = None;
                         self.add_dialog_open = false;
                         self.import_text.clear();
-                        logger::info(&format!(
-                            "Imported {count} flags from {}",
-                            file.display()
-                        ));
+                        logger::info(&format!("Imported {count} flags from {}", file.display()));
                     }
                     Err(e) => self.dialog_error = Some(format!("Import failed: {e}")),
                 }
@@ -485,9 +488,17 @@ impl RuststrapApp {
 
     /// Installs Sober when missing (update=false) or updates it (update=true).
     fn sober_job(&mut self, update: bool) {
-        let title = if update { "Updating Sober" } else { "Installing Sober" };
+        let title = if update {
+            "Updating Sober"
+        } else {
+            "Installing Sober"
+        };
         self.spawn_job(title, move |_, tx| {
-            let outcome = if update { sober::update() } else { sober::ensure_installed() };
+            let outcome = if update {
+                sober::update()
+            } else {
+                sober::ensure_installed()
+            };
             match outcome {
                 Ok(()) => {}
                 Err(e) => logger::error(&format!("{title} failed: {e}")),
@@ -655,12 +666,9 @@ impl RuststrapApp {
         ui.horizontal(|ui| {
             let busy = self.busy.load(Ordering::SeqCst);
             let launch = |ui: &mut egui::Ui, label: &str, mode: LaunchMode| {
-                ui.add_enabled(
-                    !busy,
-                    egui::Button::new(label).min_size(BUTTON_SIZE.into()),
-                )
-                .clicked()
-                .then_some(mode)
+                ui.add_enabled(!busy, egui::Button::new(label).min_size(BUTTON_SIZE.into()))
+                    .clicked()
+                    .then_some(mode)
             };
             if let Some(mode) = launch(ui, "Launch Player", LaunchMode::Player) {
                 self.launch_job(mode, self.force_reinstall, self.pinned_version());
@@ -699,15 +707,27 @@ impl RuststrapApp {
             Err(_) => (String::new(), String::new()),
         };
 
-        egui::Grid::new("versions").striped(true).num_columns(3).show(ui, |ui| {
-            let player_label = if linux_player { "Player (Sober)" } else { "Player" };
-            if !linux_player {
-                version_row(ui, player_label, &player_guid, self.latest_player.as_deref());
-            }
-            if cfg!(windows) || !linux_player {
-                version_row(ui, "Studio", &studio_guid, self.latest_studio.as_deref());
-            }
-        });
+        egui::Grid::new("versions")
+            .striped(true)
+            .num_columns(3)
+            .show(ui, |ui| {
+                let player_label = if linux_player {
+                    "Player (Sober)"
+                } else {
+                    "Player"
+                };
+                if !linux_player {
+                    version_row(
+                        ui,
+                        player_label,
+                        &player_guid,
+                        self.latest_player.as_deref(),
+                    );
+                }
+                if cfg!(windows) || !linux_player {
+                    version_row(ui, "Studio", &studio_guid, self.latest_studio.as_deref());
+                }
+            });
 
         if ui
             .add_sized(BUTTON_SIZE, egui::Button::new("Check for updates"))
@@ -722,8 +742,16 @@ impl RuststrapApp {
             ui.add_space(8.0);
             ui.heading("Sober");
             let busy = self.busy.load(Ordering::SeqCst);
-            ui.label(if self.sober_installed { "Sober is installed" } else { "Sober is not installed" });
-            let label = if self.sober_installed { "Update Sober" } else { "Install Sober" };
+            ui.label(if self.sober_installed {
+                "Sober is installed"
+            } else {
+                "Sober is not installed"
+            });
+            let label = if self.sober_installed {
+                "Update Sober"
+            } else {
+                "Install Sober"
+            };
             if ui
                 .add_enabled(!busy, egui::Button::new(label).min_size(BUTTON_SIZE.into()))
                 .clicked()
@@ -754,11 +782,14 @@ impl RuststrapApp {
         );
         ui.add_space(8.0);
 
-        let json = serde_json::to_string_pretty(&Value::Object(self.fflags.clone()))
-            .unwrap_or_default();
+        let json =
+            serde_json::to_string_pretty(&Value::Object(self.fflags.clone())).unwrap_or_default();
 
         ui.horizontal_wrapped(|ui| {
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Add flag...")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Add flag..."))
+                .clicked()
+            {
                 self.dialog_error = None;
                 self.add_dialog_open = true;
             }
@@ -783,7 +814,10 @@ impl RuststrapApp {
             } else {
                 "Delete all"
             };
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new(delete_label)).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new(delete_label))
+                .clicked()
+            {
                 if self.confirm_delete_all {
                     let count = self.fflags.len();
                     self.fflags.clear();
@@ -797,11 +831,17 @@ impl RuststrapApp {
                     self.confirm_armed_at = Some(std::time::Instant::now());
                 }
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Copy JSON")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Copy JSON"))
+                .clicked()
+            {
                 ui.ctx().copy_text(json.clone());
                 logger::info("Fast flags JSON copied to clipboard");
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Import JSON")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Import JSON"))
+                .clicked()
+            {
                 self.dialog_error = None;
                 self.import_text.clear();
                 self.add_dialog_open = false;
@@ -809,16 +849,22 @@ impl RuststrapApp {
                 self.dialog_tab = AddTab::Json;
                 self.add_dialog_open = true;
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Export JSON")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Export JSON"))
+                .clicked()
+            {
                 self.export_text = json.clone();
                 self.export_dialog_open = true;
             }
             if ui
-                .add_sized(BUTTON_SIZE, egui::Button::new(if cfg!(windows) {
-                    "Reload from file"
-                } else {
-                    "Reload from Sober config"
-                }))
+                .add_sized(
+                    BUTTON_SIZE,
+                    egui::Button::new(if cfg!(windows) {
+                        "Reload from file"
+                    } else {
+                        "Reload from Sober config"
+                    }),
+                )
                 .clicked()
             {
                 self.reload_flags();
@@ -833,7 +879,10 @@ impl RuststrapApp {
             }
             let save_enabled = self.flag_dirty && !self.busy.load(Ordering::SeqCst);
             if ui
-                .add_enabled(save_enabled, egui::Button::new("Save flags").min_size(BUTTON_SIZE.into()))
+                .add_enabled(
+                    save_enabled,
+                    egui::Button::new("Save flags").min_size(BUTTON_SIZE.into()),
+                )
                 .clicked()
             {
                 self.save_flags();
@@ -863,7 +912,11 @@ impl RuststrapApp {
         ui.add_space(4.0);
 
         if rows.is_empty() {
-            ui.weak(if self.fflags.is_empty() { "No flags set." } else { "No flags match the search." });
+            ui.weak(if self.fflags.is_empty() {
+                "No flags set."
+            } else {
+                "No flags match the search."
+            });
         } else {
             egui::Grid::new("fflags")
                 .striped(true)
@@ -913,7 +966,10 @@ impl RuststrapApp {
                         [460.0, 200.0],
                         egui::TextEdit::multiline(&mut self.export_text).interactive(false),
                     );
-                    if ui.add_sized(BUTTON_SIZE, egui::Button::new("Copy to clipboard")).clicked() {
+                    if ui
+                        .add_sized(BUTTON_SIZE, egui::Button::new("Copy to clipboard"))
+                        .clicked()
+                    {
                         ui.ctx().copy_text(self.export_text.clone());
                         logger::info("Fast flags JSON copied to clipboard");
                     }
@@ -932,28 +988,34 @@ impl RuststrapApp {
 
         match self.dialog_tab {
             AddTab::Single => {
-                egui::Grid::new("add_flag_fields").num_columns(2).show(ui, |ui| {
-                    ui.label("Name");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.dialog_name)
-                            .hint_text("FFlagExample")
-                            .desired_width(280.0),
-                    );
-                    ui.end_row();
-                    ui.label("Value");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.dialog_value)
-                            .hint_text("True")
-                            .desired_width(280.0),
-                    );
-                    ui.end_row();
-                });
-                if ui.add_sized(BUTTON_SIZE, egui::Button::new("Add flag")).clicked() {
+                egui::Grid::new("add_flag_fields")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.dialog_name)
+                                .hint_text("FFlagExample")
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                        ui.label("Value");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.dialog_value)
+                                .hint_text("True")
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                    });
+                if ui
+                    .add_sized(BUTTON_SIZE, egui::Button::new("Add flag"))
+                    .clicked()
+                {
                     let key = self.dialog_name.trim().to_string();
                     if key.is_empty() {
                         self.dialog_error = Some("Flag name is required.".into());
                     } else {
-                        self.fflags.insert(key.clone(), Value::String(self.dialog_value.clone()));
+                        self.fflags
+                            .insert(key.clone(), Value::String(self.dialog_value.clone()));
                         self.flag_edits.insert(key, self.dialog_value.clone());
                         self.dialog_name.clear();
                         self.dialog_value.clear();
@@ -985,7 +1047,10 @@ impl RuststrapApp {
                         None,
                     );
                 }
-                if ui.add_sized(BUTTON_SIZE, egui::Button::new("Import")).clicked() {
+                if ui
+                    .add_sized(BUTTON_SIZE, egui::Button::new("Import"))
+                    .clicked()
+                {
                     match serde_json::from_str::<Value>(&self.import_text) {
                         Ok(Value::Object(map)) => {
                             let count = map.len();
@@ -1054,8 +1119,16 @@ impl RuststrapApp {
             logger::error("State file lock unavailable; settings not saved");
             return;
         };
-        guard.settings.player_channel = self.settings_edits.player_channel.trim().to_ascii_lowercase();
-        guard.settings.studio_channel = self.settings_edits.studio_channel.trim().to_ascii_lowercase();
+        guard.settings.player_channel = self
+            .settings_edits
+            .player_channel
+            .trim()
+            .to_ascii_lowercase();
+        guard.settings.studio_channel = self
+            .settings_edits
+            .studio_channel
+            .trim()
+            .to_ascii_lowercase();
         guard.settings.update_roblox = self.settings_edits.update_roblox;
         guard.settings.background_app = self.settings_edits.background_app;
         guard.settings.max_thread_download = self.settings_edits.max_threads;
@@ -1124,7 +1197,10 @@ impl RuststrapApp {
             {
                 self.save_gbs();
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Reload")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Reload"))
+                .clicked()
+            {
                 self.reload_gbs();
             }
             if ui
@@ -1157,7 +1233,10 @@ impl RuststrapApp {
                     Some("GlobalBasicSettings_13.xml"),
                 );
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open file location")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Open file location"))
+                .clicked()
+            {
                 open_folder(
                     gbs::file_location(paths::get())
                         .parent()
@@ -1225,7 +1304,12 @@ impl RuststrapApp {
                                 g.gbs_dirty = true;
                             }
                         });
-                        gbs_bool_row(ui, "Start in fullscreen", &mut g.gbs_edits.fullscreen, &mut g.gbs_dirty);
+                        gbs_bool_row(
+                            ui,
+                            "Start in fullscreen",
+                            &mut g.gbs_edits.fullscreen,
+                            &mut g.gbs_dirty,
+                        );
                         gbs_bool_row(
                             ui,
                             "Automatically create max quality",
@@ -1265,10 +1349,20 @@ impl RuststrapApp {
                                 g.gbs_dirty = true;
                             }
                         });
-                        gbs_bool_row(ui, "Shift lock switch", &mut g.gbs_edits.shift_lock, &mut g.gbs_dirty);
+                        gbs_bool_row(
+                            ui,
+                            "Shift lock switch",
+                            &mut g.gbs_edits.shift_lock,
+                            &mut g.gbs_dirty,
+                        );
                         g.vector_row(ui, "First person sensitivity", true);
                         g.vector_row(ui, "Third person sensitivity", false);
-                        gbs_bool_row(ui, "Invert camera Y", &mut g.gbs_edits.camera_y_inverted, &mut g.gbs_dirty);
+                        gbs_bool_row(
+                            ui,
+                            "Invert camera Y",
+                            &mut g.gbs_edits.camera_y_inverted,
+                            &mut g.gbs_dirty,
+                        );
                     }),
                 ),
                 (
@@ -1289,7 +1383,10 @@ impl RuststrapApp {
                         ui.horizontal(|ui| {
                             ui.label("Player list layout");
                             if ui
-                                .add(egui::DragValue::new(&mut g.gbs_edits.player_list_layout).range(0..=1))
+                                .add(
+                                    egui::DragValue::new(&mut g.gbs_edits.player_list_layout)
+                                        .range(0..=1),
+                                )
                                 .changed()
                             {
                                 g.gbs_dirty = true;
@@ -1302,14 +1399,29 @@ impl RuststrapApp {
                                 g.gbs_dirty = true;
                             }
                         });
-                        gbs_bool_row(ui, "Reduce motion", &mut g.gbs_edits.reduced_motion, &mut g.gbs_dirty);
-                        gbs_bool_row(ui, "Show performance stats", &mut g.gbs_edits.perf_stats, &mut g.gbs_dirty);
+                        gbs_bool_row(
+                            ui,
+                            "Reduce motion",
+                            &mut g.gbs_edits.reduced_motion,
+                            &mut g.gbs_dirty,
+                        );
+                        gbs_bool_row(
+                            ui,
+                            "Show performance stats",
+                            &mut g.gbs_edits.perf_stats,
+                            &mut g.gbs_dirty,
+                        );
                     }),
                 ),
                 (
                     "Miscellaneous",
                     Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
-                        gbs_bool_row(ui, "Chat translation", &mut g.gbs_edits.chat_translation, &mut g.gbs_dirty);
+                        gbs_bool_row(
+                            ui,
+                            "Chat translation",
+                            &mut g.gbs_edits.chat_translation,
+                            &mut g.gbs_dirty,
+                        );
                         gbs_bool_row(ui, "Enable VR", &mut g.gbs_edits.vr, &mut g.gbs_dirty);
                         ui.horizontal(|ui| {
                             ui.label("Haptic strength");
@@ -1359,7 +1471,11 @@ impl RuststrapApp {
                 &mut self.gbs_edits.tps_x
             };
             changed |= ui
-                .add(egui::TextEdit::singleline(x).hint_text("X").desired_width(70.0))
+                .add(
+                    egui::TextEdit::singleline(x)
+                        .hint_text("X")
+                        .desired_width(70.0),
+                )
                 .changed();
             let y = if first_person {
                 &mut self.gbs_edits.fps_y
@@ -1367,7 +1483,11 @@ impl RuststrapApp {
                 &mut self.gbs_edits.tps_y
             };
             changed |= ui
-                .add(egui::TextEdit::singleline(y).hint_text("Y").desired_width(70.0))
+                .add(
+                    egui::TextEdit::singleline(y)
+                        .hint_text("Y")
+                        .desired_width(70.0),
+                )
                 .changed();
         });
         if changed {
@@ -1405,7 +1525,11 @@ impl RuststrapApp {
             raw: std::mem::take(&mut self.gbs.raw),
         };
         let e = &self.gbs_edits;
-        let framerate = if e.framerate_cap < 1 { -1 } else { e.framerate_cap };
+        let framerate = if e.framerate_cap < 1 {
+            -1
+        } else {
+            e.framerate_cap
+        };
         let result = (|| -> Result<(), String> {
             g.set("int", "FramerateCap", &framerate.to_string())?;
             g.set("token", "SavedQualityLevel", &e.quality_level.to_string())?;
@@ -1435,7 +1559,11 @@ impl RuststrapApp {
             if !e.ui_transparency.trim().is_empty() {
                 g.set("float", "PreferredTransparency", e.ui_transparency.trim())?;
             }
-            g.set("token", "PeoplePageLayout", &e.player_list_layout.to_string())?;
+            g.set(
+                "token",
+                "PeoplePageLayout",
+                &e.player_list_layout.to_string(),
+            )?;
             g.set("token", "PreferredTextSize", &e.font_size.to_string())?;
             g.set_bool("ReducedMotion", e.reduced_motion)?;
             g.set_bool("PerformanceStatsVisible", e.perf_stats)?;
@@ -1488,7 +1616,10 @@ impl RuststrapApp {
                     "Behavior",
                     Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
                         g.settings_dirty |= ui
-                            .checkbox(&mut g.settings_edits.update_roblox, "Update Roblox before launch")
+                            .checkbox(
+                                &mut g.settings_edits.update_roblox,
+                                "Update Roblox before launch",
+                            )
                             .changed();
                         g.settings_dirty |= ui
                             .checkbox(
@@ -1505,7 +1636,10 @@ impl RuststrapApp {
                         ui.horizontal(|ui| {
                             ui.label("Cleaner (days old, 0 = off)");
                             g.settings_dirty |= ui
-                                .add(egui::Slider::new(&mut g.settings_edits.cleaner_days, 0..=90))
+                                .add(egui::Slider::new(
+                                    &mut g.settings_edits.cleaner_days,
+                                    0..=90,
+                                ))
                                 .changed();
                         });
                     }),
@@ -1529,33 +1663,39 @@ impl RuststrapApp {
             ui.add_space(8.0);
             ui.heading("Sober settings");
             let busy = self.busy.load(Ordering::SeqCst);
-            egui::Grid::new("sober_toggles").num_columns(2).show(ui, |ui| {
-                for index in 0..self.sober_toggles.len() {
-                    ui.monospace(self.sober_toggles[index].0);
-                    ui.checkbox(&mut self.sober_toggles[index].2, "");
-                    ui.end_row();
-                }
-            });
-            let mut save_row = |ui: &mut egui::Ui| {
-            if ui
-                .add_enabled(!busy, egui::Button::new("Save Sober settings").min_size(BUTTON_SIZE.into()))
-                .clicked()
-            {
-                let toggles = self.sober_toggles
-                    .iter()
-                    .map(|(_, key, on)| (key.to_string(), *on))
-                    .collect::<Vec<_>>();
-                self.spawn_job("Saving Sober settings", move |_, _| {
-                    let mut config = sober::load_config(paths::get());
-                    for (key, on) in toggles {
-                        config.insert(key, Value::Bool(on));
-                    }
-                    match sober::save_config(paths::get(), &config) {
-                        Ok(()) => logger::info("Sober settings saved"),
-                        Err(e) => logger::error(&format!("Failed to save Sober settings: {e}")),
+            egui::Grid::new("sober_toggles")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    for index in 0..self.sober_toggles.len() {
+                        ui.monospace(self.sober_toggles[index].0);
+                        ui.checkbox(&mut self.sober_toggles[index].2, "");
+                        ui.end_row();
                     }
                 });
-            }
+            let mut save_row = |ui: &mut egui::Ui| {
+                if ui
+                    .add_enabled(
+                        !busy,
+                        egui::Button::new("Save Sober settings").min_size(BUTTON_SIZE.into()),
+                    )
+                    .clicked()
+                {
+                    let toggles = self
+                        .sober_toggles
+                        .iter()
+                        .map(|(_, key, on)| (key.to_string(), *on))
+                        .collect::<Vec<_>>();
+                    self.spawn_job("Saving Sober settings", move |_, _| {
+                        let mut config = sober::load_config(paths::get());
+                        for (key, on) in toggles {
+                            config.insert(key, Value::Bool(on));
+                        }
+                        match sober::save_config(paths::get(), &config) {
+                            Ok(()) => logger::info("Sober settings saved"),
+                            Err(e) => logger::error(&format!("Failed to save Sober settings: {e}")),
+                        }
+                    });
+                }
             };
             ui.horizontal(|ui| {
                 save_row(ui);
@@ -1580,7 +1720,10 @@ impl RuststrapApp {
         ui.horizontal(|ui| {
             let busy = self.busy.load(Ordering::SeqCst);
             if ui
-                .add_enabled(!busy, egui::Button::new("Clean now").min_size(BUTTON_SIZE.into()))
+                .add_enabled(
+                    !busy,
+                    egui::Button::new("Clean now").min_size(BUTTON_SIZE.into()),
+                )
                 .clicked()
             {
                 self.spawn_job("Cleaning", |shared, _| {
@@ -1589,13 +1732,22 @@ impl RuststrapApp {
                     }
                 });
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open data folder")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Open data folder"))
+                .clicked()
+            {
                 open_folder(paths::get().data_root.clone());
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open modifications folder")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Open modifications folder"))
+                .clicked()
+            {
                 open_folder(paths::get().modifications.clone());
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open log folder")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Open log folder"))
+                .clicked()
+            {
                 open_folder(paths::get().logs.clone());
             }
         });
@@ -1603,7 +1755,10 @@ impl RuststrapApp {
         ui.add_space(8.0);
         #[cfg(windows)]
         ui.horizontal(|ui| {
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Register protocols")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Register protocols"))
+                .clicked()
+            {
                 match std::env::current_exe() {
                     Ok(exe) => {
                         crate::registry::register_player(&exe);
@@ -1613,7 +1768,10 @@ impl RuststrapApp {
                     Err(e) => logger::error(&format!("Cannot locate executable: {e}")),
                 }
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Unregister protocols")).clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Unregister protocols"))
+                .clicked()
+            {
                 crate::registry::unregister_all();
                 logger::info("Protocol registration removed");
             }
@@ -1622,13 +1780,21 @@ impl RuststrapApp {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             let busy = self.busy.load(Ordering::SeqCst);
-            ui.add_enabled(!busy, egui::Checkbox::new(&mut self.confirm_uninstall, "Uninstall Roblox (removes all versions and downloads)"));
+            ui.add_enabled(
+                !busy,
+                egui::Checkbox::new(
+                    &mut self.confirm_uninstall,
+                    "Uninstall Roblox (removes all versions and downloads)",
+                ),
+            );
             if self.confirm_uninstall
                 && ui
                     .add_enabled(
                         !busy,
-                        egui::Button::new(egui::RichText::new("Uninstall now").color(egui::Color32::RED))
-                            .min_size(BUTTON_SIZE.into()),
+                        egui::Button::new(
+                            egui::RichText::new("Uninstall now").color(egui::Color32::RED),
+                        )
+                        .min_size(BUTTON_SIZE.into()),
                     )
                     .clicked()
             {
@@ -1651,25 +1817,41 @@ impl RuststrapApp {
         ui.heading("Ruststrap");
         ui.add_space(8.0);
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-        ui.label("A native Rust rewrite of Froststrap: installs, updates, patches and launches Roblox.");
-        ui.hyperlink_to("Source", "https://github.com/nemesisprojectstudios/Ruststrap");
-        ui.hyperlink_to("Froststrap (original)", "https://github.com/Froststrap/Froststrap");
+        ui.label(
+            "A native Rust rewrite of Froststrap: installs, updates, patches and launches Roblox.",
+        );
+        ui.hyperlink_to(
+            "Source",
+            "https://github.com/nemesisprojectstudios/Ruststrap",
+        );
+        ui.hyperlink_to(
+            "Froststrap (original)",
+            "https://github.com/Froststrap/Froststrap",
+        );
         ui.label("Licensed under MPL-2.0.");
     }
 }
 
 fn version_row(ui: &mut egui::Ui, label: &str, installed: &str, latest: Option<&str>) {
     ui.label(label);
-    let installed = if installed.is_empty() { "not installed" } else { &installed[..8.min(installed.len())] };
+    let installed = if installed.is_empty() {
+        "not installed"
+    } else {
+        &installed[..8.min(installed.len())]
+    };
     match latest {
         Some(latest) => {
             let up_to_date = installed.eq_ignore_ascii_case(&latest[..8.min(latest.len())]);
             if up_to_date {
-                ui.label(egui::RichText::new(installed).color(egui::Color32::from_rgb(0x70, 0xC0, 0x70)));
+                ui.label(
+                    egui::RichText::new(installed).color(egui::Color32::from_rgb(0x70, 0xC0, 0x70)),
+                );
                 ui.label("up to date");
             } else {
                 ui.label(installed);
-                ui.label(egui::RichText::new(format!("latest {latest}")).color(egui::Color32::YELLOW));
+                ui.label(
+                    egui::RichText::new(format!("latest {latest}")).color(egui::Color32::YELLOW),
+                );
             }
         }
         None => {
@@ -1683,9 +1865,9 @@ fn version_row(ui: &mut egui::Ui, label: &str, installed: &str, latest: Option<&
 fn parse_flags_json(text: &str) -> Option<(serde_json::Map<String, Value>, usize)> {
     match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(map)) => {
-        let count = map.len();
-        Some((map, count))
-    }
+            let count = map.len();
+            Some((map, count))
+        }
         _ => None,
     }
 }
@@ -1694,7 +1876,9 @@ fn parse_flags_json(text: &str) -> Option<(serde_json::Map<String, Value>, usize
 /// Overlong tile content scrolls inside its own tile.
 fn tile_grid<A>(ui: &mut egui::Ui, app: &mut A, tiles: Vec<(&'static str, TileBody<A>)>) {
     let [width, height] = TILE_SIZE;
-    let columns = ((ui.available_width() + TILE_GAP) / (width + TILE_GAP)).floor().max(1.0) as usize;
+    let columns = ((ui.available_width() + TILE_GAP) / (width + TILE_GAP))
+        .floor()
+        .max(1.0) as usize;
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = TILE_GAP;
         for row in tiles.chunks(columns) {
@@ -1757,26 +1941,26 @@ mod tests {
         };
         let out = ctx.run_ui(input, |ui| {
             egui::CentralPanel::default_margins().show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    let bodies: Vec<(&'static str, TileBody<()>)> = ["A", "B", "C", "D", "E"]
-                        .into_iter()
-                        .map(|name| {
-                            let record = observed.clone();
-                            (
-                                name,
-                                Box::new(
-                                    move |ui: &mut egui::Ui, _app: &mut ()| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let bodies: Vec<(&'static str, TileBody<()>)> = ["A", "B", "C", "D", "E"]
+                            .into_iter()
+                            .map(|name| {
+                                let record = observed.clone();
+                                (
+                                    name,
+                                    Box::new(move |ui: &mut egui::Ui, _app: &mut ()| {
                                         for row in ["one", "two", "three", "four"] {
                                             let rect = ui.label(format!("{name}-{row}")).rect;
                                             record.borrow_mut().push((name, rect));
                                         }
-                                    },
-                                ) as TileBody<()>,
-                            )
-                        })
-                        .collect();
-                    tile_grid(ui, &mut (), bodies);
-                });
+                                    }) as TileBody<()>,
+                                )
+                            })
+                            .collect();
+                        tile_grid(ui, &mut (), bodies);
+                    });
             });
         });
         out.drop_without_applying_deltas();
@@ -1808,9 +1992,9 @@ mod tests {
                 .map(|(_, r)| *r)
                 .unwrap()
         };
-        let (a, b, c) = (first("A-one"), first("B-one"), first("C-one"));
+        let (a, b, d) = (first("A-one"), first("B-one"), first("D-one"));
         let x_gap = b.min.x - a.min.x - TILE_SIZE[0];
-        let y_gap = c.min.y - a.min.y - TILE_SIZE[1];
+        let y_gap = d.min.y - a.min.y - TILE_SIZE[1];
         assert!(
             (x_gap - y_gap).abs() <= 2.0,
             "tile gaps must match: {x_gap} vs {y_gap}"
@@ -1819,7 +2003,7 @@ mod tests {
             a.min.x + TILE_SIZE[0] <= b.min.x,
             "tile B must tile to the side of tile A"
         );
-        assert!(c.min.y > a.max.y, "tile C must tile below the first row");
+        assert!(d.min.y > a.max.y, "tile D must tile below the first row");
         for (l1, r1) in labels.iter() {
             for (l2, r2) in labels.iter() {
                 if l1 != l2 {
@@ -1836,7 +2020,12 @@ mod tests {
     fn footer_bar_stays_pinned_across_passes() {
         let ctx = egui::Context::default();
         let mut bars = Vec::new();
-        for (width, height) in [(800.0, 600.0), (800.0, 600.0), (1024.0, 768.0), (1024.0, 768.0)] {
+        for (width, height) in [
+            (800.0, 600.0),
+            (800.0, 600.0),
+            (1024.0, 768.0),
+            (1024.0, 768.0),
+        ] {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::pos2(0.0, 0.0),
@@ -1848,18 +2037,14 @@ mod tests {
                 egui::Panel::left("nav").resizable(false).show(ui, |ui| {
                     ui.label("nav");
                 });
-                let bar =
-                    egui::Panel::bottom("actions")
-                        .exact_size(56.0)
-                        .show(ui, |ui| {
-                            ui.add_space(4.0);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label("Save and Launch");
-                                },
-                            );
+                let bar = egui::Panel::bottom("actions")
+                    .exact_size(56.0)
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label("Save and Launch");
                         });
+                    });
                 let central = egui::CentralPanel::default_margins().show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -1880,10 +2065,21 @@ mod tests {
                 bar
             );
             assert_eq!(bar.max.y, *height, "bar must touch the window bottom");
-            assert!(central.max.y <= bar.min.y + 8.0 + 0.01, "central panel must end above the bar");
+            assert!(
+                central.max.y <= bar.min.y + 8.0 + 0.01,
+                "central panel must end above the bar"
+            );
         }
-        assert_eq!(bars[0].0.size(), bars[1].0.size(), "bar height must not creep between passes");
-        assert_eq!(bars[2].0.size(), bars[3].0.size(), "bar height must not creep after resize");
+        assert_eq!(
+            bars[0].0.size(),
+            bars[1].0.size(),
+            "bar height must not creep between passes"
+        );
+        assert_eq!(
+            bars[2].0.size(),
+            bars[3].0.size(),
+            "bar height must not creep after resize"
+        );
     }
 
     #[test]
@@ -1924,8 +2120,15 @@ mod tests {
             output.drop_without_applying_deltas();
         }
         for (panel_bottom, inner_height, viewport) in observed.borrow().iter() {
-            assert_eq!(panel_bottom - inner_height, 16.0, "panel frame bottom must match the panel inner rect plus both margins");
-            assert!(viewport.max.y <= panel_bottom + 0.01, "scroll viewport must not spill below the panel");
+            assert_eq!(
+                panel_bottom - inner_height,
+                16.0,
+                "panel frame bottom must match the panel inner rect plus both margins"
+            );
+            assert!(
+                viewport.max.y <= panel_bottom + 0.01,
+                "scroll viewport must not spill below the panel"
+            );
             assert!(
                 (viewport.height() - inner_height).abs() < 32.0,
                 "scroll viewport fills the panel: no dead band, got {} vs {}",
