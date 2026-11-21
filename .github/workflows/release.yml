@@ -1,0 +1,74 @@
+# Build x64 Windows + x64 Linux release archives and attach them to a release.
+# Triggered by pushing a v* tag (or manually with workflow_dispatch).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          tag="${{ github.ref_name }}"
+          if [[ ! "$tag" =~ ^v ]]; then
+            tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          dir="Ruststrap-${tag}-${{ matrix.target }}"
+          mkdir "$dir"
+          if [[ "${{ runner.os }}" = "Windows" ]]; then
+            bin="ruststrap.exe"
+          else
+            bin="ruststrap"
+          fi
+          cp "target/${{ matrix.target }}/release/$bin" README.md LICENSE "$dir/"
+          if [[ "${{ matrix.ext }}" = "zip" ]]; then
+            7z a "$dir.zip" "$dir"
+          else
+            tar czf "$dir.tar.gz" "$dir"
+          fi
+          sha256sum "$dir.${{ matrix.ext }}" > "$dir.${{ matrix.ext }}.sha256"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "DIR=$dir" >> "$GITHUB_ENV"
+          echo "EXT=${{ matrix.ext }}" >> "$GITHUB_ENV"
+
+      - name: Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for asset in "$DIR.$EXT" "$DIR.$EXT.sha256"; do
+            for i in 1 2 3; do
+              # create the release on whichever job wins the race; upload on both
+              gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Ruststrap $TAG" --generate-notes
+              if gh release upload "$TAG" "$asset" --clobber; then
+                break
+              fi
+              sleep 10
+            done
+          done
