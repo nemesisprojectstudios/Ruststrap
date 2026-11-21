@@ -1360,7 +1360,6 @@ impl RuststrapApp {
                                 .add(
                                     egui::DragValue::new(&mut g.gbs_edits.mouse_sensitivity)
                                         .speed(0.1)
-                                        .fixed_decimals(1)
                                         .min_size(egui::vec2(84.0, 0.0)),
                                 )
                                 .changed()
@@ -1913,7 +1912,6 @@ fn tile_grid<A>(ui: &mut egui::Ui, app: &mut A, tiles: Vec<(&'static str, TileBo
                                 egui::ScrollArea::vertical()
                                     .id_salt(format!("tile-{title}"))
                                     .auto_shrink([false, false])
-                                    .max_height(height - 60.0)
                                     .show(ui, |ui| body(ui, app));
                             });
                         });
@@ -1944,6 +1942,61 @@ fn open_folder(path: std::path::PathBuf) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tile_scroll_area_fills_to_the_bottom() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.allocate_ui(egui::vec2(TILE_SIZE[0] + 10.0, TILE_SIZE[1]), |ui| {
+                            ui.group(|ui| {
+                                ui.set_min_size(egui::vec2(
+                                    TILE_SIZE[0] - 16.0,
+                                    TILE_SIZE[1] - 16.0,
+                                ));
+                                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                    ui.strong("T");
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("tile-T")
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            for i in 0..60 {
+                                                ui.label(format!("row-{i:03}"));
+                                            }
+                                        });
+                                });
+                            });
+                        });
+                    });
+            });
+        });
+        let meshes = ctx.tessellate(out.shapes.clone(), 2.0);
+        out.drop_without_applying_deltas();
+        let bottom = TILE_SIZE[1] - 16.0;
+        let deepest = meshes
+            .iter()
+            .filter_map(|cp| match &cp.primitive {
+                egui::epaint::Primitive::Mesh(m) => {
+                    m.vertices.iter().map(|v| v.pos.y).reduce(f32::max)
+                }
+                _ => None,
+            })
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            deepest >= bottom,
+            "tile content must paint down to the tile bottom (deepest {deepest}, want >= {bottom})"
+        );
+    }
+
     use super::*;
 
     #[test]
