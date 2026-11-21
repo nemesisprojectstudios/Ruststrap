@@ -173,7 +173,6 @@ impl<'a> Bootstrapper<'a> {
 
     fn run_sober_flow(&mut self) -> Result<(), String> {
         logger::info("Linux (Player): Sober manages Roblox, skipping deployment check");
-        sober::setup_symlink(self.paths);
         sober::ensure_installed()?;
         sober::kill();
 

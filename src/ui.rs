@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::bootstrapper::{Bootstrapper, LaunchMode};
 use crate::fastflags;
+use crate::gbs;
 use crate::http::Http;
 use crate::logger;
 use crate::packages;
@@ -27,6 +28,7 @@ use crate::state::Ctx;
 enum Page {
     Home,
     FastFlags,
+    Roblox,
     Settings,
     About,
 }
@@ -93,6 +95,13 @@ struct RuststrapApp {
     dialog_value: String,
     import_text: String,
     export_text: String,
+    gbs: gbs::Gbs,
+    gbs_edits: GbsEdits,
+    gbs_init: bool,
+    gbs_exists: bool,
+    gbs_dirty: bool,
+    gbs_read_only: bool,
+    gbs_save_error: Option<String>,
     settings_edits: SettingsEdits,
     confirm_uninstall: bool,
     force_reinstall: bool,
@@ -128,7 +137,105 @@ struct SettingsEdits {
     background_app: bool,
 }
 
+/// Typed view of the UserGameSettings values we expose, mirroring
+/// Froststrap's GlobalSettingsViewModel (same keys, same defaults).
+#[derive(Default)]
+struct GbsEdits {
+    framerate_cap: i64,
+    quality_level: i64,
+    fullscreen: bool,
+    max_quality: bool,
+    vignette: bool,
+    master_volume: f64,
+    studio_volume: f64,
+    party_voice: f64,
+    voice_chat: f64,
+    mouse_sensitivity: f64,
+    shift_lock: bool,
+    fps_x: String,
+    fps_y: String,
+    tps_x: String,
+    tps_y: String,
+    camera_y_inverted: bool,
+    haptic_strength: f64,
+    ui_transparency: String,
+    font_size: i64,
+    player_list_layout: i64,
+    reduced_motion: bool,
+    perf_stats: bool,
+    chat_translation: bool,
+    vr: bool,
+}
+
+fn gbs_bool_row(ui: &mut egui::Ui, label: &str, value: &mut bool, dirty: &mut bool) {
+    if ui.checkbox(value, label).changed() {
+        *dirty = true;
+    }
+}
+
 impl RuststrapApp {
+    /// Re-reads GlobalBasicSettings from disk into the typed edit view.
+    fn reload_gbs(&mut self) {
+        self.gbs = gbs::Gbs::load(paths::get());
+        self.gbs_exists = gbs::file_location(paths::get()).exists();
+        self.gbs_read_only = gbs::Gbs::is_read_only();
+        self.gbs_save_error = None;
+        self.gbs_dirty = false;
+        let g = &self.gbs;
+        self.gbs_edits = GbsEdits {
+            framerate_cap: g
+                .get("int", "FramerateCap")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(60),
+            quality_level: g
+                .get("token", "SavedQualityLevel")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(1),
+            fullscreen: g.get_bool("Fullscreen").unwrap_or(false),
+            max_quality: g.get_bool("MaxQualityEnabled").unwrap_or(false),
+            vignette: g
+                .get_bool("VignetteEnabled")
+                .or_else(|| g.get_bool("VignetteEnabledCustomOption"))
+                .unwrap_or(false),
+            master_volume: g.get_float("MasterVolume").unwrap_or(1.0),
+            studio_volume: g.get_float("MasterVolumeStudio").unwrap_or(1.0),
+            party_voice: g.get_float("PartyVoiceVolume").unwrap_or(1.0),
+            voice_chat: g.get_float("VoiceChatVolume").unwrap_or(1.0),
+            mouse_sensitivity: g.get_float("MouseSensitivity").unwrap_or(1.0),
+            shift_lock: g
+                .get("token", "ControlMode")
+                .map(|v| v.trim() == "1")
+                .unwrap_or(false),
+            fps_x: g
+                .get_vector("MouseSensitivityFirstPerson", "X")
+                .unwrap_or_default(),
+            fps_y: g
+                .get_vector("MouseSensitivityFirstPerson", "Y")
+                .unwrap_or_default(),
+            tps_x: g
+                .get_vector("MouseSensitivityThirdPerson", "X")
+                .unwrap_or_default(),
+            tps_y: g
+                .get_vector("MouseSensitivityThirdPerson", "Y")
+                .unwrap_or_default(),
+            camera_y_inverted: g.get_bool("CameraYInverted").unwrap_or(false),
+            haptic_strength: g.get_float("HapticStrength").unwrap_or(0.0),
+            ui_transparency: g.get("float", "PreferredTransparency").unwrap_or_default(),
+            font_size: g
+                .get("token", "PreferredTextSize")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(1),
+            player_list_layout: g
+                .get("token", "PeoplePageLayout")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0),
+            reduced_motion: g.get_bool("ReducedMotion").unwrap_or(false),
+            perf_stats: g.get_bool("PerformanceStatsVisible").unwrap_or(false),
+            chat_translation: g.get_bool("ChatTranslationEnabled").unwrap_or(false),
+            vr: g.get_bool("VREnabled").unwrap_or(false),
+        };
+    }
+
     fn new(ctx: Ctx) -> RuststrapApp {
         let (tx, rx) = mpsc::channel();
         let fflags = Self::load_flags();
@@ -169,6 +276,13 @@ impl RuststrapApp {
             dialog_value: String::new(),
             import_text: String::new(),
             export_text: String::new(),
+            gbs: gbs::Gbs::default(),
+            gbs_edits: GbsEdits::default(),
+            gbs_init: false,
+            gbs_exists: false,
+            gbs_dirty: false,
+            gbs_read_only: false,
+            gbs_save_error: None,
             settings_edits,
             confirm_uninstall: false,
             force_reinstall: false,
@@ -331,6 +445,7 @@ impl eframe::App for RuststrapApp {
             for (page, label) in [
                 (Page::Home, "Home"),
                 (Page::FastFlags, "Fast Flags"),
+                (Page::Roblox, "Roblox settings"),
                 (Page::Settings, "Settings"),
                 (Page::About, "About"),
             ] {
@@ -349,7 +464,7 @@ impl eframe::App for RuststrapApp {
             }
         });
 
-        egui::Frame::central_panel(root.style()).show(root, |ui| {
+        egui::CentralPanel::default_margins().show(root, |ui| {
             if let Some(p) = progress::snapshot() {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -376,6 +491,7 @@ impl eframe::App for RuststrapApp {
                 .show(ui, |ui| match self.page {
                     Page::Home => self.home_page(ui),
                     Page::FastFlags => self.fast_flags_page(ui),
+                    Page::Roblox => self.roblox_settings_page(ui),
                     Page::Settings => self.settings_page(ui),
                     Page::About => self.about_page(ui),
                 });
@@ -704,6 +820,31 @@ impl RuststrapApp {
                     egui::TextEdit::multiline(&mut self.import_text)
                         .hint_text("{\"FFlagExample\": \"True\"}"),
                 );
+                if ui.add_sized(BUTTON_SIZE, egui::Button::new("Choose file...")).clicked() {
+                    let picked = rfd::FileDialog::new()
+                        .add_filter("Fast flags JSON", &["json"])
+                        .set_title("Import FastFlags")
+                        .pick_file();
+                    if let Some(file) = picked {
+                        match std::fs::read_to_string(&file)
+                            .map_err(|e| e.to_string())
+                            .and_then(|text| parse_flags_json(&text).ok_or_else(|| "not a JSON object of flag names to values".to_string()))
+                        {
+                            Ok((map, count)) => {
+                                self.fflags.extend(map);
+                                self.flag_edits.clear();
+                                self.flag_dirty = true;
+                                self.dialog_error = None;
+                                self.add_dialog_open = false;
+                                self.import_text.clear();
+                                logger::info(&format!("Imported {count} flags from {}", file.display()));
+                            }
+                            Err(e) => {
+                                self.dialog_error = Some(format!("Import failed: {e}"));
+                            }
+                        }
+                    }
+                }
                 if ui.add_sized(BUTTON_SIZE, egui::Button::new("Import")).clicked() {
                     match serde_json::from_str::<Value>(&self.import_text) {
                         Ok(Value::Object(map)) => {
@@ -766,6 +907,344 @@ impl RuststrapApp {
             match sober::save_config(paths::get(), &config) {
                 Ok(()) => logger::info("Fast flags saved to Sober config"),
                 Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
+            }
+        }
+    }
+
+    fn roblox_settings_page(&mut self, ui: &mut egui::Ui) {
+        if !self.gbs_init {
+            self.reload_gbs();
+            self.gbs_init = true;
+        }
+        ui.heading("Roblox settings");
+        if !self.gbs_exists {
+            ui.weak("File not found yet; saving creates a fresh one.");
+        }
+        ui.add_space(8.0);
+
+        ui.horizontal_wrapped(|ui| {
+            let save_enabled = self.gbs_dirty && !self.busy.load(Ordering::SeqCst);
+            if ui
+                .add_enabled(
+                    save_enabled,
+                    egui::Button::new("Save changes").min_size(BUTTON_SIZE.into()),
+                )
+                .clicked()
+            {
+                self.save_gbs();
+            }
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Reload")).clicked() {
+                self.reload_gbs();
+            }
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Import XML...")).clicked() {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("Roblox settings", &["xml"])
+                    .set_title("Import Roblox settings")
+                    .pick_file();
+                if let Some(file) = picked {
+                    match gbs::Gbs::import(&file) {
+                        Ok(()) => self.reload_gbs(),
+                        Err(e) => logger::error(&format!("Failed to import Roblox settings: {e}")),
+                    }
+                }
+            }
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Export XML...")).clicked() {
+                let picked = rfd::FileDialog::new()
+                    .add_filter("Roblox settings", &["xml"])
+                    .set_file_name("GlobalBasicSettings_13.xml")
+                    .set_title("Export Roblox settings")
+                    .save_file();
+                if let Some(file) = picked {
+                    let doc = gbs::Gbs {
+                        raw: self.gbs.raw.clone(),
+                    };
+                    if let Err(e) = doc.export(&file) {
+                        logger::error(&format!("Failed to export Roblox settings: {e}"));
+                    }
+                }
+            }
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open file location")).clicked() {
+                open_folder(
+                    gbs::file_location(paths::get())
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or_default(),
+                );
+            }
+        });
+
+        let mut read_only = self.gbs_read_only;
+        if ui
+            .checkbox(
+                &mut read_only,
+                "Read-only (Roblox forgets edited settings on exit without it)",
+            )
+            .changed()
+        {
+            match gbs::Gbs::set_read_only(read_only) {
+                Ok(()) => {
+                    self.gbs_read_only = read_only;
+                    logger::info(&format!("Roblox settings file read-only: {read_only}"));
+                }
+                Err(e) => logger::error(&format!("Failed to set read-only: {e}")),
+            }
+        }
+        let stubborn = self.gbs_edits.fullscreen
+            || self.gbs_edits.max_quality
+            || self.gbs_edits.vignette
+            || self.gbs_edits.framerate_cap >= 1;
+        if stubborn && !self.gbs_read_only {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Enable Read-only for these settings to survive Roblox exiting.",
+            );
+        }
+        if let Some(error) = &self.gbs_save_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.label("Graphics");
+            ui.horizontal(|ui| {
+                ui.label("Framerate limit (0 = none)");
+                if ui
+                    .add(egui::DragValue::new(&mut self.gbs_edits.framerate_cap).range(0..=999))
+                    .changed()
+                {
+                    self.gbs_dirty = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Start quality level");
+                if ui
+                    .add(egui::Slider::new(&mut self.gbs_edits.quality_level, 0..=10))
+                    .changed()
+                {
+                    self.gbs_dirty = true;
+                }
+            });
+            gbs_bool_row(ui, "Start in fullscreen", &mut self.gbs_edits.fullscreen, &mut self.gbs_dirty);
+            gbs_bool_row(
+                ui,
+                "Automatically create max quality",
+                &mut self.gbs_edits.max_quality,
+                &mut self.gbs_dirty,
+            );
+            gbs_bool_row(ui, "Vignette", &mut self.gbs_edits.vignette, &mut self.gbs_dirty);
+        });
+
+        ui.group(|ui| {
+            ui.label("Audio");
+            for (label, field) in [
+                ("Master volume", "master_volume"),
+                ("Studio master volume", "studio_volume"),
+                ("Party voice volume", "party_voice"),
+                ("Voice chat volume", "voice_chat"),
+            ] {
+                self.audio_slider_row(ui, label, field);
+            }
+        });
+
+        ui.group(|ui| {
+            ui.label("Input");
+            ui.horizontal(|ui| {
+                ui.label("Mouse sensitivity");
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.gbs_edits.mouse_sensitivity, 0.0..=20.0)
+                            .fixed_decimals(1),
+                    )
+                    .changed()
+                {
+                    self.gbs_dirty = true;
+                }
+            });
+            gbs_bool_row(ui, "Shift lock switch", &mut self.gbs_edits.shift_lock, &mut self.gbs_dirty);
+            self.vector_row(ui, "First person sensitivity", true);
+            self.vector_row(ui, "Third person sensitivity", false);
+            gbs_bool_row(ui, "Invert camera Y", &mut self.gbs_edits.camera_y_inverted, &mut self.gbs_dirty);
+            ui.horizontal(|ui| {
+                ui.label("Haptic strength");
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.gbs_edits.haptic_strength, 0.0..=1.0)
+                            .fixed_decimals(1),
+                    )
+                    .changed()
+                {
+                    self.gbs_dirty = true;
+                }
+            });
+        });
+
+        ui.group(|ui| {
+            ui.label("Accessibility");
+            ui.horizontal(|ui| {
+                ui.label("UI transparency (0-1)");
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.gbs_edits.ui_transparency)
+                            .desired_width(80.0),
+                    )
+                    .changed()
+                {
+                    self.gbs_dirty = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Player list layout");
+                if ui
+                    .add(egui::DragValue::new(&mut self.gbs_edits.player_list_layout).range(0..=1))
+                    .changed()
+                {
+                    self.gbs_dirty = true;
+                }
+                ui.label("Text size");
+                if ui
+                    .add(egui::DragValue::new(&mut self.gbs_edits.font_size).range(1..=4))
+                    .changed()
+                {
+                    self.gbs_dirty = true;
+                }
+            });
+            gbs_bool_row(ui, "Reduce motion", &mut self.gbs_edits.reduced_motion, &mut self.gbs_dirty);
+            gbs_bool_row(ui, "Show performance stats", &mut self.gbs_edits.perf_stats, &mut self.gbs_dirty);
+        });
+
+        ui.group(|ui| {
+            ui.label("Miscellaneous");
+            gbs_bool_row(ui, "Chat translation", &mut self.gbs_edits.chat_translation, &mut self.gbs_dirty);
+            gbs_bool_row(ui, "Enable VR", &mut self.gbs_edits.vr, &mut self.gbs_dirty);
+        });
+    }
+
+    fn audio_slider_row(&mut self, ui: &mut egui::Ui, label: &str, field: &str) {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let value = match field {
+                "master_volume" => &mut self.gbs_edits.master_volume,
+                "studio_volume" => &mut self.gbs_edits.studio_volume,
+                "party_voice" => &mut self.gbs_edits.party_voice,
+                _ => &mut self.gbs_edits.voice_chat,
+            };
+            changed = ui
+                .add(egui::Slider::new(value, 0.0..=1.0).fixed_decimals(1))
+                .changed();
+        });
+        if changed {
+            self.gbs_dirty = true;
+        }
+    }
+
+    /// Vector2 text pairs, edited as X/Y like Froststrap's GlobalSettingsPage.
+    fn vector_row(&mut self, ui: &mut egui::Ui, label: &str, first_person: bool) {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let x = if first_person {
+                &mut self.gbs_edits.fps_x
+            } else {
+                &mut self.gbs_edits.tps_x
+            };
+            changed |= ui
+                .add(egui::TextEdit::singleline(x).hint_text("X").desired_width(70.0))
+                .changed();
+            let y = if first_person {
+                &mut self.gbs_edits.fps_y
+            } else {
+                &mut self.gbs_edits.tps_y
+            };
+            changed |= ui
+                .add(egui::TextEdit::singleline(y).hint_text("Y").desired_width(70.0))
+                .changed();
+        });
+        if changed {
+            self.gbs_dirty = true;
+        }
+    }
+
+    /// Writes every exposed value back into the XML and persists it.
+    fn save_gbs(&mut self) {
+        for (label, raw) in [
+            ("first person sensitivity X", self.gbs_edits.fps_x.trim()),
+            ("first person sensitivity Y", self.gbs_edits.fps_y.trim()),
+            ("third person sensitivity X", self.gbs_edits.tps_x.trim()),
+            ("third person sensitivity Y", self.gbs_edits.tps_y.trim()),
+        ] {
+            if !raw.is_empty() && raw.replace(',', ".").parse::<f64>().is_err() {
+                self.gbs_save_error = Some(format!("{label} is not a number"));
+                return;
+            }
+        }
+        if !self.gbs_edits.ui_transparency.trim().is_empty()
+            && self
+                .gbs_edits
+                .ui_transparency
+                .trim()
+                .replace(',', ".")
+                .parse::<f64>()
+                .is_err()
+        {
+            self.gbs_save_error = Some("UI transparency is not a number".to_string());
+            return;
+        }
+
+        let mut g = gbs::Gbs {
+            raw: std::mem::take(&mut self.gbs.raw),
+        };
+        let e = &self.gbs_edits;
+        let framerate = if e.framerate_cap < 1 { -1 } else { e.framerate_cap };
+        let result = (|| -> Result<(), String> {
+            g.set("int", "FramerateCap", &framerate.to_string())?;
+            g.set("token", "SavedQualityLevel", &e.quality_level.to_string())?;
+            g.set_bool("Fullscreen", e.fullscreen)?;
+            g.set_bool("MaxQualityEnabled", e.max_quality)?;
+            g.set_bool("VignetteEnabled", e.vignette)?;
+            g.set_bool("VignetteEnabledCustomOption", e.vignette)?;
+            g.set_float("MasterVolume", e.master_volume)?;
+            g.set_float("MasterVolumeStudio", e.studio_volume)?;
+            g.set_float("PartyVoiceVolume", e.party_voice)?;
+            g.set_float("VoiceChatVolume", e.voice_chat)?;
+            g.set_float("MouseSensitivity", e.mouse_sensitivity)?;
+            g.set("token", "ControlMode", if e.shift_lock { "1" } else { "0" })?;
+            for (name, axis, value) in [
+                ("MouseSensitivityFirstPerson", "X", e.fps_x.trim()),
+                ("MouseSensitivityFirstPerson", "Y", e.fps_y.trim()),
+                ("MouseSensitivityThirdPerson", "X", e.tps_x.trim()),
+                ("MouseSensitivityThirdPerson", "Y", e.tps_y.trim()),
+            ] {
+                g.ensure_vector(name)?;
+                if !value.is_empty() {
+                    g.set_vector(name, axis, value)?;
+                }
+            }
+            g.set_bool("CameraYInverted", e.camera_y_inverted)?;
+            g.set_float("HapticStrength", e.haptic_strength)?;
+            if !e.ui_transparency.trim().is_empty() {
+                g.set("float", "PreferredTransparency", e.ui_transparency.trim())?;
+            }
+            g.set("token", "PeoplePageLayout", &e.player_list_layout.to_string())?;
+            g.set("token", "PreferredTextSize", &e.font_size.to_string())?;
+            g.set_bool("ReducedMotion", e.reduced_motion)?;
+            g.set_bool("PerformanceStatsVisible", e.perf_stats)?;
+            g.set_bool("ChatTranslationEnabled", e.chat_translation)?;
+            g.set_bool("VREnabled", e.vr)?;
+            Ok(())
+        })();
+
+        self.gbs.raw = g.raw.clone();
+        if let Err(e) = result {
+            self.gbs_save_error = Some(e);
+        } else {
+            let doc = gbs::Gbs { raw: g.raw };
+            match doc.save(paths::get()) {
+                Ok(()) => {
+                    self.gbs_dirty = false;
+                    self.gbs_save_error = None;
+                }
+                Err(e) => self.gbs_save_error = Some(format!("Save failed: {e}")),
             }
         }
     }
@@ -977,6 +1456,16 @@ fn version_row(ui: &mut egui::Ui, label: &str, installed: &str, latest: Option<&
         }
     }
     ui.end_row();
+}
+
+fn parse_flags_json(text: &str) -> Option<(serde_json::Map<String, Value>, usize)> {
+    match serde_json::from_str::<Value>(text) {
+        Ok(Value::Object(map)) => {
+        let count = map.len();
+        Some((map, count))
+    }
+        _ => None,
+    }
 }
 
 fn open_folder(path: std::path::PathBuf) {

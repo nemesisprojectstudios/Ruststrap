@@ -17,8 +17,9 @@ pub struct Paths {
     pub versions: PathBuf,
     pub modifications: PathBuf,
     pub logs: PathBuf,
-    /// Full Roblox instance storage; on Linux this is the Sober data root
-    /// (symlinked from ~/.var/app/<Sober>) so Sober and Ruststrap share one location.
+    /// Full Roblox instance storage: package downloads/version extraction on
+    /// Windows, and Wine Studio installs on Linux. Sober manages its own
+    /// state under ~/.var/app/org.vinegarhq.Sober (see sober.rs).
     pub roblox: PathBuf,
 }
 

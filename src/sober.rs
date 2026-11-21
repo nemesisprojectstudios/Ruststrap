@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use serde_json::{Map, Value};
@@ -10,14 +10,14 @@ use serde_json::{Map, Value};
 use crate::logger;
 use crate::paths::{home_dir, Paths, SOBER_FLATPAK_ID};
 
-/// Sober's data directory lives inside Ruststrap's versions folder; the flatpak
-/// gets redirected there via a symlink so both share one storage location.
-pub fn data_dir(paths: &Paths) -> PathBuf {
-    paths.roblox.clone()
+/// Sober's flatpak data root. All Sober state (config.json, GlobalBasicSettings,
+/// internal data) lives here and Ruststrap edits it in place.
+pub fn data_dir(_paths: &Paths) -> PathBuf {
+    home_dir().join(".var/app").join(SOBER_FLATPAK_ID)
 }
 
 pub fn config_file(paths: &Paths) -> PathBuf {
-    paths.roblox.join("config/sober/config.json")
+    data_dir(paths).join("config/sober/config.json")
 }
 
 fn flatpak_ok(args: &[&str]) -> Result<bool, String> {
@@ -75,62 +75,9 @@ pub fn update() -> Result<(), String> {
     Ok(())
 }
 
-/// Redirects the flatpak's data directory into Ruststrap's storage.
-pub fn setup_symlink(paths: &Paths) {
-    let flatpak_data = home_dir()
-        .join(".var/app")
-        .join(SOBER_FLATPAK_ID);
-    let target = data_dir(paths);
-
-    if let Ok(resolved) = std::fs::read_link(&flatpak_data) {
-        if resolved == target {
-            logger::info("Sober symlink already in place");
-            return;
-        }
-        let _ = std::fs::remove_file(&flatpak_data);
-    }
-
-    let _ = std::fs::create_dir_all(&target);
-
-    if flatpak_data.exists() {
-        logger::info("Moving existing Sober data into Ruststrap storage");
-        if let Err(e) = copy_tree(&flatpak_data, &target) {
-            logger::error(&format!("Failed to move Sober data: {e}; skipping symlink setup"));
-            return;
-        }
-        let _ = std::fs::remove_dir_all(&flatpak_data);
-    }
-    if let Some(parent) = flatpak_data.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    #[cfg(unix)]
-    make_symlink(&target, &flatpak_data);
-}
-
-#[cfg(unix)]
-fn make_symlink(target: &Path, link: &Path) {
-    match std::os::unix::fs::symlink(target, link) {
-        Ok(()) => logger::info(&format!(
-            "Created symlink: {} -> {}",
-            link.display(),
-            target.display()
-        )),
-        Err(e) => logger::error(&format!("Failed to create Sober symlink: {e}")),
-    }
-}
-
-fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_tree(&entry.path(), &to)?;
-        } else {
-            std::fs::copy(entry.path(), &to)?;
-        }
-    }
-    Ok(())
+/// Sober's Roblox user settings (GlobalBasicSettings_13.xml).
+pub fn base_settings_file(paths: &Paths) -> PathBuf {
+    data_dir(paths).join("data/sober/appData/GlobalBasicSettings_13.xml")
 }
 
 /// Loads Sober's config.json as a JSON object (empty when missing or unreadable).

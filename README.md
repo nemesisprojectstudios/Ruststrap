@@ -16,7 +16,8 @@ The window (`src/ui.rs`, egui) carries Froststrap's core feature set:
 Every page scrolls if the window is too small, and all buttons share one uniform size.
 
 - **Home**: Launch Player / Launch Studio buttons, optional reinstall-on-launch, an optional client version pin, installed vs. latest channel versions, Sober install/update status on Linux, and a live log pane; a progress bar with package counters while downloads run.
-- **Fast Flags**: add, edit, and remove flags — stored in `ClientAppSettings.json` on Windows and written directly into Sober's `config.json` (typed values) on Linux; a "Reload" button re-reads the file (discarding unsaved edits).
+- **Fast Flags**: a Froststrap-style editor — "Add flag" dialog (single flag or paste/import a JSON map), delete selected / delete all, copy & export JSON, search, and inline value editing. Flags are stored in `ClientAppSettings.json` on Windows and written directly into Sober's real `config.json` at `~/.var/app/org.vinegarhq.Sober` (typed values) on Linux; a "Reload" button re-reads the file (discarding unsaved edits). Import accepts a pasted JSON map or a file picked through the native file dialog; JSON can be copied out or exported to a file.
+- **Roblox settings**: a dedicated page editing Roblox's own user settings (`GlobalBasicSettings_13.xml` — framerate cap, start quality, fullscreen/max-quality/vignette, all volume sliders, mouse sensitivity & shift lock, accessibility options), with round-trip-safe editing, import/export via a native file dialog, an "Open file location" button, and the read-only toggle Roblox needs so edited values survive exit.
 - **Settings**: per-mode release channels, parallel download count, cleaner age, update/background toggles, Sober's own config options on Linux with an "Open file location" button (opens the folder in your file manager), "Clean now", folder shortcuts (data / Roblox / modifications / logs), protocol registration toggles (Windows), and a confirmed "Uninstall Roblox".
 - **About**: version, links, license.
 
@@ -70,7 +71,7 @@ src/
   ui.rs            egui window (Home / Fast Flags / Settings / About)
 ```
 
-Dependencies beyond the CLI set: `eframe`/`egui` (glow renderer, no wgpu) for the window.
+Dependencies beyond the CLI set: `eframe`/`egui` (glow renderer, no wgpu) for the window, and `rfd` (portal backend on Linux, native dialogs on Windows) for file pickers.
 
 ## Building
 

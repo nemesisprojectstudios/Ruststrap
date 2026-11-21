@@ -12,6 +12,7 @@ mod cleaner;
 mod deployment;
 mod fastflags;
 mod gamejoin;
+mod gbs;
 mod http;
 mod launch;
 mod lock;
