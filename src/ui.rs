@@ -38,6 +38,9 @@ enum WorkerMsg {
 
 type SharedCtx = Arc<Mutex<Ctx>>;
 
+/// Every button uses this size so the layout stays uniform.
+const BUTTON_SIZE: [f32; 2] = [150.0, 32.0];
+
 pub fn run(ctx: Ctx) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -111,17 +114,7 @@ struct SettingsEdits {
 impl RuststrapApp {
     fn new(ctx: Ctx) -> RuststrapApp {
         let (tx, rx) = mpsc::channel();
-        // Flags live in ClientAppSettings.json on Windows; in Sober's
-        // config.json on Linux (Sober never reads ClientAppSettings).
-        let fflags = if cfg!(windows) {
-            fastflags::load_or_init(paths::get())
-        } else {
-            sober::load_config(paths::get())
-                .get("fflags")
-                .and_then(|v| v.as_object())
-                .cloned()
-                .unwrap_or_default()
-        };
+        let fflags = Self::load_flags();
         let mut sober_toggles = Vec::new();
         if !cfg!(windows) {
             let config = sober::load_config(paths::get());
@@ -157,6 +150,26 @@ impl RuststrapApp {
             sober_installed: !cfg!(windows) && sober::is_installed(),
             sober_toggles,
         }
+    }
+
+    // Flags live in ClientAppSettings.json on Windows; in Sober's
+    // config.json on Linux (Sober never reads ClientAppSettings).
+    fn load_flags() -> serde_json::Map<String, Value> {
+        if cfg!(windows) {
+            fastflags::load_or_init(paths::get())
+        } else {
+            sober::load_config(paths::get())
+                .get("fflags")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    fn reload_flags(&mut self) {
+        self.fflags = Self::load_flags();
+        self.flag_edits.clear();
+        logger::info("Fast flags reloaded");
     }
 
     fn spawn_job(
@@ -291,8 +304,13 @@ impl eframe::App for RuststrapApp {
                 (Page::Settings, "Settings"),
                 (Page::About, "About"),
             ] {
+                let fill = if self.page == page {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                };
                 if ui
-                    .selectable_label(self.page == page, label)
+                    .add_sized(BUTTON_SIZE, egui::Button::new(label).fill(fill))
                     .clicked()
                 {
                     self.page = page;
@@ -334,11 +352,19 @@ impl RuststrapApp {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             let busy = self.busy.load(Ordering::SeqCst);
-            if ui.add_enabled(!busy, egui::Button::new("Launch Player")).clicked() {
-                self.launch_job(LaunchMode::Player, self.force_reinstall, self.pinned_version());
+            let launch = |ui: &mut egui::Ui, label: &str, mode: LaunchMode| {
+                ui.add_enabled(
+                    !busy,
+                    egui::Button::new(label).min_size(BUTTON_SIZE.into()),
+                )
+                .clicked()
+                .then_some(mode)
+            };
+            if let Some(mode) = launch(ui, "Launch Player", LaunchMode::Player) {
+                self.launch_job(mode, self.force_reinstall, self.pinned_version());
             }
-            if ui.add_enabled(!busy, egui::Button::new("Launch Studio")).clicked() {
-                self.launch_job(LaunchMode::Studio, self.force_reinstall, self.pinned_version());
+            if let Some(mode) = launch(ui, "Launch Studio", LaunchMode::Studio) {
+                self.launch_job(mode, self.force_reinstall, self.pinned_version());
             }
             ui.checkbox(&mut self.force_reinstall, "Reinstall");
         });
@@ -381,7 +407,10 @@ impl RuststrapApp {
             }
         });
 
-        if ui.button("Check for updates").clicked() {
+        if ui
+            .add_sized(BUTTON_SIZE, egui::Button::new("Check for updates"))
+            .clicked()
+        {
             self.check_versions_job();
         }
 
@@ -393,7 +422,10 @@ impl RuststrapApp {
             let busy = self.busy.load(Ordering::SeqCst);
             ui.label(if self.sober_installed { "Sober is installed" } else { "Sober is not installed" });
             let label = if self.sober_installed { "Update Sober" } else { "Install Sober" };
-            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+            if ui
+                .add_enabled(!busy, egui::Button::new(label).min_size(BUTTON_SIZE.into()))
+                .clicked()
+            {
                 self.sober_job(self.sober_installed);
             }
         }
@@ -405,6 +437,7 @@ impl RuststrapApp {
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .auto_shrink([false, false])
+            .max_height(260.0)
             .show(ui, |ui| {
                 for line in logger::recent() {
                     ui.monospace(line);
@@ -449,7 +482,7 @@ impl RuststrapApp {
                                 self.flag_edits.insert(key.clone(), buf);
                                 changed = true;
                             }
-                            if ui.button("Remove").clicked() {
+                            if ui.add_sized([90.0, 24.0], egui::Button::new("Remove")).clicked() {
                                 to_remove.push(key.clone());
                                 changed = true;
                             }
@@ -462,7 +495,11 @@ impl RuststrapApp {
                         .on_hover_text("Flag name");
                     ui.text_edit_singleline(&mut self.new_flag_value)
                         .on_hover_text("Value");
-                    if ui.button("Add flag").clicked() && !self.new_flag_key.trim().is_empty() {
+                    if ui
+                        .add_sized(BUTTON_SIZE, egui::Button::new("Add flag"))
+                        .clicked()
+                        && !self.new_flag_key.trim().is_empty()
+                    {
                         let key = self.new_flag_key.trim().to_string();
                         self.fflags.insert(key.clone(), Value::String(self.new_flag_value.clone()));
                         self.flag_edits.insert(key, self.new_flag_value.clone());
@@ -477,7 +514,18 @@ impl RuststrapApp {
             self.fflags.remove(&key);
             self.flag_edits.remove(&key);
         }
-        if changed && ui.button("Save flags").clicked() {
+        ui.horizontal(|ui| {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new(if cfg!(windows) { "Reload from file" } else { "Reload from Sober config" }))
+                .clicked()
+            {
+                self.reload_flags();
+            }
+            let enabled = changed && !self.busy.load(Ordering::SeqCst);
+            if ui
+                .add_enabled(enabled, egui::Button::new("Save flags").min_size(BUTTON_SIZE.into()))
+                .clicked()
+            {
             // apply live edits over the map
             for (key, edit) in &self.flag_edits {
                 self.fflags.insert(key.clone(), Value::String(edit.clone()));
@@ -511,7 +559,8 @@ impl RuststrapApp {
                     Err(e) => logger::error(&format!("Failed to save fast flags: {e}")),
                 }
             }
-        }
+            }
+        });
     }
 
     fn settings_page(&mut self, ui: &mut egui::Ui) {
@@ -547,7 +596,10 @@ impl RuststrapApp {
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Save settings").clicked() {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Save settings"))
+                .clicked()
+            {
                 let Ok(mut guard) = self.shared.lock() else {
                     logger::error("State file lock unavailable; settings not saved");
                     return;
@@ -567,7 +619,7 @@ impl RuststrapApp {
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(8.0);
-            ui.heading(format!("Sober settings ({})", sober::config_file(paths::get()).display()));
+            ui.heading("Sober settings");
             let busy = self.busy.load(Ordering::SeqCst);
             egui::Grid::new("sober_toggles").num_columns(2).show(ui, |ui| {
                 for index in 0..self.sober_toggles.len() {
@@ -576,7 +628,11 @@ impl RuststrapApp {
                     ui.end_row();
                 }
             });
-            if ui.add_enabled(!busy, egui::Button::new("Save Sober settings")).clicked() {
+            let mut save_row = |ui: &mut egui::Ui| {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Save Sober settings").min_size(BUTTON_SIZE.into()))
+                .clicked()
+            {
                 let toggles = self.sober_toggles
                     .iter()
                     .map(|(_, key, on)| (key.to_string(), *on))
@@ -592,6 +648,20 @@ impl RuststrapApp {
                     }
                 });
             }
+            };
+            ui.horizontal(|ui| {
+                save_row(ui);
+                if ui
+                    .add_sized(BUTTON_SIZE, egui::Button::new("Open file location"))
+                    .clicked()
+                {
+                    let folder = sober::config_file(paths::get())
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or_default();
+                    open_folder(folder);
+                }
+            });
         }
 
         ui.add_space(16.0);
@@ -601,20 +671,23 @@ impl RuststrapApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let busy = self.busy.load(Ordering::SeqCst);
-            if ui.add_enabled(!busy, egui::Button::new("Clean now")).clicked() {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Clean now").min_size(BUTTON_SIZE.into()))
+                .clicked()
+            {
                 self.spawn_job("Cleaning", |shared, _| {
                     if let Ok(guard) = shared.lock() {
                         crate::cleaner::clean_now(paths::get(), guard.settings.cleaner_days.max(1));
                     }
                 });
             }
-            if ui.button("Open data folder").clicked() {
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open data folder")).clicked() {
                 open_folder(paths::get().data_root.clone());
             }
-            if ui.button("Open modifications folder").clicked() {
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open modifications folder")).clicked() {
                 open_folder(paths::get().modifications.clone());
             }
-            if ui.button("Open log folder").clicked() {
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open log folder")).clicked() {
                 open_folder(paths::get().logs.clone());
             }
         });
@@ -622,7 +695,7 @@ impl RuststrapApp {
         ui.add_space(8.0);
         #[cfg(windows)]
         ui.horizontal(|ui| {
-            if ui.button("Register protocols").clicked() {
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Register protocols")).clicked() {
                 match std::env::current_exe() {
                     Ok(exe) => {
                         crate::registry::register_player(&exe);
@@ -632,7 +705,7 @@ impl RuststrapApp {
                     Err(e) => logger::error(&format!("Cannot locate executable: {e}")),
                 }
             }
-            if ui.button("Unregister protocols").clicked() {
+            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Unregister protocols")).clicked() {
                 crate::registry::unregister_all();
                 logger::info("Protocol registration removed");
             }
@@ -644,7 +717,11 @@ impl RuststrapApp {
             ui.add_enabled(!busy, egui::Checkbox::new(&mut self.confirm_uninstall, "Uninstall Roblox (removes all versions and downloads)"));
             if self.confirm_uninstall
                 && ui
-                    .add_enabled(!busy, egui::Button::new(egui::RichText::new("Uninstall now").color(egui::Color32::RED)))
+                    .add_enabled(
+                        !busy,
+                        egui::Button::new(egui::RichText::new("Uninstall now").color(egui::Color32::RED))
+                            .min_size(BUTTON_SIZE.into()),
+                    )
                     .clicked()
             {
                 self.confirm_uninstall = false;

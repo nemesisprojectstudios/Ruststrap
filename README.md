@@ -13,9 +13,11 @@ A native, headless Rust rewrite of [Froststrap](https://github.com/Froststrap/Fr
 
 The window (`src/ui.rs`, egui) carries Froststrap's core feature set:
 
+Every page scrolls if the window is too small, and all buttons share one uniform size.
+
 - **Home**: Launch Player / Launch Studio buttons, optional reinstall-on-launch, an optional client version pin, installed vs. latest channel versions, Sober install/update status on Linux, and a live log pane; a progress bar with package counters while downloads run.
-- **Fast Flags**: add, edit, and remove flags — stored in `ClientAppSettings.json` on Windows and written directly into Sober's `config.json` (typed values) on Linux.
-- **Settings**: per-mode release channels, parallel download count, cleaner age, update/background toggles, Sober's own config options on Linux, "Clean now", folder shortcuts (data / Roblox / modifications / logs), protocol registration toggles (Windows), and a confirmed "Uninstall Roblox".
+- **Fast Flags**: add, edit, and remove flags — stored in `ClientAppSettings.json` on Windows and written directly into Sober's `config.json` (typed values) on Linux; a "Reload" button re-reads the file (discarding unsaved edits).
+- **Settings**: per-mode release channels, parallel download count, cleaner age, update/background toggles, Sober's own config options on Linux with an "Open file location" button (opens the folder in your file manager), "Clean now", folder shortcuts (data / Roblox / modifications / logs), protocol registration toggles (Windows), and a confirmed "Uninstall Roblox".
 - **About**: version, links, license.
 
 Background work runs on worker threads and reports through a shared progress slot and the log ring buffer, so the UI always stays responsive.
