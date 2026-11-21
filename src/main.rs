@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Ruststrap: a native Rust rewrite of Froststrap, a cross-platform Roblox bootstrapper.
-//! Headless by design: installs, updates, configures, and launches Roblox, then
-//! optionally sticks around for cleanup while the game runs.
+//! Headless when invoked with arguments (protocol handlers, CLI); opens its GUI
+//! window when started without arguments or with --ui.
 
 mod appstorage;
 mod bootstrapper;
@@ -20,9 +20,11 @@ mod manifest;
 mod packages;
 mod paths;
 mod processes;
+mod progress;
 mod registry;
 mod sober;
 mod state;
+mod ui;
 mod watcher;
 
 use bootstrapper::{Bootstrapper, LaunchMode};
@@ -37,6 +39,7 @@ struct Args {
     no_launch: bool,
     no_wait: bool,
     unregister: bool,
+    ui: bool,
 }
 
 impl Default for Args {
@@ -50,6 +53,7 @@ impl Default for Args {
             no_launch: false,
             no_wait: false,
             unregister: false,
+            ui: false,
         }
     }
 }
@@ -95,6 +99,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--force" => parsed.force = true,
             "--no-launch" => parsed.no_launch = true,
             "--no-wait" => parsed.no_wait = true,
+            "--ui" => parsed.ui = true,
             "--no-gpu" | "--console" | "-c" | "-g" => {
                 // Froststrap UI flags, accepted (and ignored) for compatibility
             }
@@ -126,7 +131,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     }
 
     // A bare roblox URI works without an explicit mode; a version pin with no
-    // mode defaults to the player; everything else defaults to a plain player launch.
+    // mode defaults to the player; everything else defaults to a plain player
+    // launch. No arguments at all opens the GUI.
     if parsed.mode == LaunchMode::None {
         if let Some(payload) = &parsed.payload {
             if payload.starts_with("roblox") {
@@ -134,6 +140,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             } else {
                 return Err(format!("Unrecognized target: {payload}"));
             }
+        } else if args.is_empty() {
+            parsed.ui = true;
         } else {
             parsed.mode = LaunchMode::Player;
         }
@@ -178,6 +186,7 @@ Options:
       --force                    Force a reinstallation of Roblox
       --no-launch                Install or update Roblox without launching it
       --no-wait                  Do not stay alive while Roblox is running
+      --ui                       Open the graphical UI (default with no arguments)
       --unregister               Remove Roblox protocol handlers (Windows)
   -h, --help                     Show this help
   -V, --version                  Show version
@@ -205,6 +214,12 @@ fn main() {
     info(&format!("Log file: {}", paths.logs.join("Ruststrap.log").display()));
 
     let ctx = state::Ctx::load(paths);
+
+    if parsed.ui {
+        info("Opening UI");
+        ui::run(ctx);
+        return;
+    }
 
     if parsed.unregister {
         #[cfg(windows)]

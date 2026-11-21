@@ -47,7 +47,7 @@ pub fn load_or_init(paths: &Paths) -> Map<String, Value> {
     }
 }
 
-fn save(path: &Path, flags: &Map<String, Value>) -> Result<(), std::io::Error> {
+pub fn save(path: &Path, flags: &Map<String, Value>) -> Result<(), std::io::Error> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

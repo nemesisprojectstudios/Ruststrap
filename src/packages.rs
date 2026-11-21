@@ -10,7 +10,7 @@ use crate::http::{fast_hash_file, Http};
 use crate::logger;
 use crate::manifest::{copy_dir_overwrite, extract_zip, package_map, parse_manifest, remove_dir_forced, Package};
 use crate::paths::Paths;
-use crate::state::{load, Ctx, Settings};
+use crate::state::{load, Ctx, DistributionState, Settings};
 use crate::{fastflags, processes};
 
 pub const SOBER_DIR_NAME: &str = "Sober";
@@ -124,6 +124,13 @@ pub fn upgrade(
     queue.sort_by_key(|pkg| std::cmp::Reverse(pkg.packed_size));
 
     let queue = Arc::new(Mutex::new(queue));
+    let failed_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let finished_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    crate::progress::set_counted(
+        "Downloading packages",
+        0,
+        packages.len() as u64,
+    );
     let failures: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let worker_count = ctx
         .settings
@@ -137,6 +144,8 @@ pub fn upgrade(
             let failures = failures.clone();
             let dir_map = dir_map.clone();
             let target = target.clone();
+            let failed_count = failed_count.clone();
+            let finished_count = finished_count.clone();
             scope.spawn(move || loop {
                 let Some(pkg) = queue.lock().unwrap().pop() else { break };
 
@@ -157,8 +166,15 @@ pub fn upgrade(
                     Err(e) => {
                         logger::error(&format!("Failed to install {}: {e}", pkg.name));
                         failures.lock().unwrap().push(format!("{}: {e}", pkg.name));
+                        failed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
+                let done = finished_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                crate::progress::set_counted(
+                    "Downloading packages",
+                    done,
+                    done + queue.lock().unwrap().len() as u64,
+                );
             });
         }
     });
@@ -234,6 +250,24 @@ fn download_package(
     let url = deployment::location(base_url, channel, &format!("/{version_guid}-{}", pkg.name));
     http.download(&url, &download_path, Some(&pkg.signature))?;
     Ok(download_path)
+}
+
+/// Removes every installed version and cached download, resetting distribution state.
+/// Sober (the Linux player client) is flatpak-managed and intentionally untouched.
+pub fn uninstall(paths: &Paths, ctx: &mut Ctx) -> Result<(), String> {
+    processes::kill_images(&[executable_name(false), executable_name(true)]);
+    for dir in [&paths.versions, &paths.downloads] {
+        if dir.exists() {
+            remove_dir_forced(dir);
+        }
+        let _ = std::fs::create_dir_all(dir);
+    }
+    for is_studio in [false, true] {
+        *ctx.distribution_state_mut(is_studio) = DistributionState::default();
+        ctx.save_distribution_state(is_studio);
+    }
+    logger::info("Ruststrap: all Roblox versions and downloads removed");
+    Ok(())
 }
 
 /// Removes version directories that neither distribution references anymore.

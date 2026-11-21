@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,10 +12,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::OnceLock;
 
 static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+static RING: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+const RING_CAP: usize = 400;
 
 pub fn init(path: PathBuf) {
     let file = OpenOptions::new().create(true).append(true).open(path).ok();
     let _ = LOG_FILE.set(Mutex::new(file));
+    let _ = RING.set(Mutex::new(VecDeque::with_capacity(RING_CAP)));
 }
 
 pub fn info(msg: &str) {
@@ -38,7 +42,22 @@ pub fn log(level: &str, msg: &str) {
                 let _ = writeln!(file, "{}", out);
             }
         }
+        if let Some(mut ring) = RING.get().and_then(|m| m.lock().ok()) {
+            if ring.len() == RING_CAP {
+                ring.pop_front();
+            }
+            ring.push_back(out);
+        }
     }
+}
+
+/// Snapshot of the log ring buffer for the UI.
+pub fn recent() -> Vec<String> {
+    RING
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map(|ring| ring.iter().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn timestamp() -> String {

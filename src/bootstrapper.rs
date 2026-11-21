@@ -9,6 +9,7 @@ use crate::lock::FileLock;
 use crate::logger;
 use crate::paths::{self, Paths, DEFAULT_CHANNEL};
 use crate::packages::{self};
+use crate::progress;
 use crate::sober;
 use crate::state::Ctx;
 use crate::watcher;
@@ -80,6 +81,7 @@ impl<'a> Bootstrapper<'a> {
         let lock = FileLock::acquire(&self.paths.data_root, "Bootstrapper");
         logger::info("Lock acquired");
 
+        progress::set("Fetching deployment info");
         let version = self.resolve_version(&channel)?;
         if !version.version.is_empty() {
             logger::info(&format!(
@@ -118,6 +120,8 @@ impl<'a> Bootstrapper<'a> {
 
         let dir = packages::version_directory(self.paths, is_studio, version_guid);
 
+        progress::set("Applying modifications");
+
         #[cfg(windows)]
         {
             let exe = std::env::current_exe().map_err(|e| format!("cannot resolve executable: {e}"))?;
@@ -146,6 +150,7 @@ impl<'a> Bootstrapper<'a> {
             return Ok(());
         }
 
+        progress::set("Launching Roblox");
         let Some(mut child) = launch::launch(self.paths, is_studio, &dir, &self.launch_args)? else {
             return Ok(());
         };
@@ -155,6 +160,7 @@ impl<'a> Bootstrapper<'a> {
             return Ok(());
         }
 
+        progress::set("Waiting for Roblox to exit");
         watcher::wait_for_exit(&mut child);
         launch::apply_app_storage(self.paths, &self.ctx.settings);
         crate::cleaner::clean(self.paths, &self.ctx.settings);

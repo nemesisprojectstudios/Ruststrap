@@ -4,9 +4,30 @@ A native, headless Rust rewrite of [Froststrap](https://github.com/Froststrap/Fr
 
 ## Principles
 
-- **Headless and lightweight**: no UI, no tray, no updater daemon. One small binary, minimal dependencies, a lock file and a few JSON state files.
+- **Lightweight**: one small binary, a lock file and a few JSON state files. No tray, no updater daemon.
+- **Headless or UI**: protocol-handler and CLI invocations run fully headless; launching with no arguments (or `--ui`) opens a small GUI window.
 - **One theme, no configuration surface**: behavior matches Froststrap's defaults; no theming or profile options.
 - **Targets only x64 Windows and x64 Linux**; nothing else is built or maintained.
+
+## UI
+
+The window (`src/ui.rs`, egui) carries Froststrap's core feature set:
+
+- **Home**: Launch Player / Launch Studio buttons, optional reinstall-on-launch, installed vs. latest channel versions, and a live log pane; a progress bar with package counters while downloads run.
+- **Fast Flags**: add, edit, and remove flags; saved to `ClientAppSettings.json` and synced (with type coercion) into Sober on Linux.
+- **Settings**: per-mode release channels, parallel download count, cleaner age, update toggles, "Clean now", folder shortcuts (data / modifications / logs), protocol registration toggles (Windows), and a confirmed "Uninstall Roblox".
+- **About**: version, links, license.
+
+Background work runs on worker threads and reports through a shared progress slot and the log ring buffer, so the UI always stays responsive.
+
+## Headless vs GUI
+
+```sh
+ruststrap                  # opens the UI
+ruststrap --ui             # opens the UI
+ruststrap roblox-player:.. # headless protocol flow
+ruststrap --player --force # headless reinstall + launch
+```
 
 ## Platform split (mirroring Froststrap)
 
@@ -42,8 +63,12 @@ src/
   lock.rs          stale-tolerant single-instance lock
   watcher.rs       child-process wait
   cleaner.rs       log/cache cleanup
+  progress.rs      shared progress slot for the UI
   logger.rs        stderr + rolling log file
+  ui.rs            egui window (Home / Fast Flags / Settings / About)
 ```
+
+Dependencies beyond the CLI set: `eframe`/`egui` (glow renderer, no wgpu) for the window.
 
 ## Building
 

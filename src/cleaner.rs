@@ -14,7 +14,11 @@ pub fn clean(paths: &Paths, settings: &crate::state::Settings) {
     if settings.cleaner_days == 0 {
         return;
     }
+    clean_now(paths, settings.cleaner_days);
+}
 
+/// A manual clean from the UI ignores the 0-day switch and uses 7 days by default.
+pub fn clean_now(paths: &Paths, days: u32) {
     let roblox_logs = if cfg!(windows) {
         paths.roblox.join("logs")
     } else {
@@ -33,7 +37,7 @@ pub fn clean(paths: &Paths, settings: &crate::state::Settings) {
         ("RobloxCache", roblox_cache),
     ];
 
-    let cutoff = SystemTime::now() - Duration::from_secs(settings.cleaner_days as u64 * 86400);
+    let cutoff = SystemTime::now() - Duration::from_secs(days as u64 * 86400);
     for (name, dir) in targets {
         if !dir.is_dir() {
             continue;
