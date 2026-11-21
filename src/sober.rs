@@ -80,13 +80,119 @@ pub fn base_settings_file(paths: &Paths) -> PathBuf {
     data_dir(paths).join("data/sober/appData/GlobalBasicSettings_13.xml")
 }
 
+/// Strips `//` and `/* */` comments outside JSON strings, like Froststrap's
+/// `ReadCommentHandling.Skip` for the same file.
+fn strip_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '/' => match chars.peek() {
+                Some('/') => {
+                    for n in chars.by_ref() {
+                        if n == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                }
+                Some('*') => {
+                    chars.next();
+                    while let Some(n) = chars.next() {
+                        if n == '*' && chars.peek() == Some(&'/') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => out.push('/'),
+            },
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Drops commas directly before `}` / `]`, like Froststrap's `AllowTrailingCommas`.
+fn strip_trailing_commas(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let c = chars[index];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            index += 1;
+            continue;
+        }
+        if c == ',' {
+            let mut next = index + 1;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            if next < chars.len() && (chars[next] == '}' || chars[next] == ']') {
+                index += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        index += 1;
+    }
+    out
+}
+
+/// Parses Sober's config.json leniently (comments and trailing commas allowed).
+/// Returns the top-level object, or an error a user can act on.
+pub fn parse_config(text: &str) -> Result<Map<String, Value>, String> {
+    let stripped = strip_json_comments(text);
+    let as_object = |v: Value| v.as_object().cloned().unwrap_or_default();
+    if let Ok(value) = serde_json::from_str::<Value>(&stripped) {
+        return Ok(as_object(value));
+    }
+    serde_json::from_str::<Value>(&strip_trailing_commas(&stripped))
+        .map(as_object)
+        .map_err(|e| e.to_string())
+}
+
 /// Loads Sober's config.json as a JSON object (empty when missing or unreadable).
 /// This is the single source of truth for fast flags and Sober's own options on Linux.
 pub fn load_config(paths: &Paths) -> Map<String, Value> {
     let path = config_file(paths);
     match std::fs::read_to_string(&path) {
-        Ok(contents) => match serde_json::from_str::<Value>(&contents) {
-            Ok(value) => value.as_object().cloned().unwrap_or_default(),
+        Ok(contents) => match parse_config(&contents) {
+            Ok(config) => config,
             Err(e) => {
                 logger::error(&format!(
                     "{} is not valid JSON ({}); using defaults",
@@ -96,7 +202,20 @@ pub fn load_config(paths: &Paths) -> Map<String, Value> {
                 Map::new()
             }
         },
-        Err(_) => Map::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            logger::info(&format!(
+                "No Sober config at {} yet; using defaults",
+                path.display()
+            ));
+            Map::new()
+        }
+        Err(e) => {
+            logger::error(&format!(
+                "Cannot read {}: {e}; using defaults",
+                path.display()
+            ));
+            Map::new()
+        }
     }
 }
 
@@ -148,4 +267,40 @@ pub fn launch(launch_uri: &str) -> Result<std::process::Child, String> {
         .args(["run", SOBER_FLATPAK_ID, &uri])
         .spawn()
         .map_err(|e| format!("failed to start Sober: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_config_tolerates_comments_and_trailing_commas() {
+        let text = r#"{
+            // line comment
+            "fflags": {
+                "FFlagExample": "True", // inline comment
+                /* block
+                   comment */
+            },
+            "dpi": "2",
+        }"#;
+        let config = parse_config(text).expect("lenient parse");
+        assert_eq!(
+            config["fflags"]["FFlagExample"],
+            json!("True")
+        );
+        assert_eq!(config["dpi"], json!("2"));
+    }
+
+    #[test]
+    fn parse_config_keeps_slashes_inside_strings() {
+        let config = parse_config(r#"{"url": "https://example.com//path"}"#).expect("parse");
+        assert_eq!(config["url"], json!("https://example.com//path"));
+    }
+
+    #[test]
+    fn parse_config_reports_broken_json() {
+        assert!(parse_config("{fflags:}").is_err());
+    }
 }

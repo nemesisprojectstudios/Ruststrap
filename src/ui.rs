@@ -36,6 +36,14 @@ enum Page {
 enum WorkerMsg {
     Versions { player: Option<String>, studio: Option<String> },
     SoberInstalled(bool),
+    FilePicked(FilePickTarget, Option<std::path::PathBuf>),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FilePickTarget {
+    FlagsImport,
+    RobloxImport,
+    RobloxExport,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -89,6 +97,7 @@ struct RuststrapApp {
     confirm_armed_at: Option<std::time::Instant>,
     add_dialog_open: bool,
     export_dialog_open: bool,
+    picking: Option<FilePickTarget>,
     dialog_tab: AddTab,
     dialog_error: Option<String>,
     dialog_name: String,
@@ -270,6 +279,7 @@ impl RuststrapApp {
             confirm_armed_at: None,
             add_dialog_open: false,
             export_dialog_open: false,
+            picking: None,
             dialog_tab: AddTab::Single,
             dialog_error: None,
             dialog_name: String::new(),
@@ -313,7 +323,95 @@ impl RuststrapApp {
         self.flag_edits.clear();
         self.flag_selected.clear();
         self.flag_dirty = false;
-        logger::info("Fast flags reloaded");
+        let (source, file) = if cfg!(windows) {
+            ("file", fastflags::fflags_path(paths::get()))
+        } else {
+            ("Sober config", sober::config_file(paths::get()))
+        };
+        logger::info(&format!(
+            "Fast flags loaded: {} entries from {} ({})",
+            self.fflags.len(),
+            source,
+            file.display()
+        ));
+    }
+
+    fn open_file_dialog(
+        &mut self,
+        target: FilePickTarget,
+        title: &'static str,
+        filter_name: &'static str,
+        extensions: &'static [&'static str],
+        save_as: Option<&'static str>,
+    ) {
+        if self.picking.is_some() {
+            return;
+        }
+        self.picking = Some(target);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            // rfd blocks until the user picks a file; run it off the UI
+            // thread so the compositor doesn't see a stalled app (ANR).
+            let picked = std::panic::catch_unwind(|| {
+                let dialog = rfd::FileDialog::new()
+                    .set_title(title)
+                    .add_filter(filter_name, extensions);
+                if let Some(name) = save_as {
+                    dialog.set_file_name(name).save_file()
+                } else {
+                    dialog.pick_file()
+                }
+            });
+            let picked = picked.unwrap_or_else(|_| {
+                logger::error("File dialog crashed");
+                None
+            });
+            let _ = tx.send(WorkerMsg::FilePicked(target, picked));
+        });
+    }
+
+    fn handle_file_pick(&mut self, target: FilePickTarget, file: Option<std::path::PathBuf>) {
+        let Some(file) = file else {
+            logger::info("File dialog cancelled");
+            return;
+        };
+        match target {
+            FilePickTarget::FlagsImport => {
+                let parsed = std::fs::read_to_string(&file)
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| {
+                        parse_flags_json(&text)
+                            .ok_or_else(|| "not a JSON object of flag names to values".to_string())
+                    });
+                match parsed {
+                    Ok((map, count)) => {
+                        self.fflags.extend(map);
+                        self.flag_edits.clear();
+                        self.flag_dirty = true;
+                        self.dialog_error = None;
+                        self.add_dialog_open = false;
+                        self.import_text.clear();
+                        logger::info(&format!(
+                            "Imported {count} flags from {}",
+                            file.display()
+                        ));
+                    }
+                    Err(e) => self.dialog_error = Some(format!("Import failed: {e}")),
+                }
+            }
+            FilePickTarget::RobloxImport => match gbs::Gbs::import(&file) {
+                Ok(()) => self.reload_gbs(),
+                Err(e) => logger::error(&format!("Failed to import Roblox settings: {e}")),
+            },
+            FilePickTarget::RobloxExport => {
+                let doc = gbs::Gbs {
+                    raw: self.gbs.raw.clone(),
+                };
+                if let Err(e) = doc.export(&file) {
+                    logger::error(&format!("Failed to export Roblox settings: {e}"));
+                }
+            }
+        }
     }
 
     fn spawn_job(
@@ -435,6 +533,10 @@ impl eframe::App for RuststrapApp {
                     self.latest_studio = studio;
                 }
                 WorkerMsg::SoberInstalled(installed) => self.sober_installed = installed,
+                WorkerMsg::FilePicked(target, file) => {
+                    self.picking = None;
+                    self.handle_file_pick(target, file);
+                }
             }
         }
 
@@ -480,14 +582,13 @@ impl eframe::App for RuststrapApp {
                 });
                 ui.add_space(8.0);
             }
-            // Cap explicitly against the live viewport rect: an unbounded
-            // ScrollArea lets the page spill past the window edge with no
-            // scrollbar, so taller pages were unreachable.
-            let page_max = (ui.ctx().viewport_rect().height() - 96.0).max(160.0);
+            // The CentralPanel already bounds available height, so the
+            // ScrollArea fills exactly to the window bottom and scrolls
+            // taller pages. Never cap it manually: a cap leaves a dead band
+            // covering part of the page.
             egui::ScrollArea::vertical()
                 .id_salt("page")
                 .auto_shrink([false, false])
-                .max_height(page_max)
                 .show(ui, |ui| match self.page {
                     Page::Home => self.home_page(ui),
                     Page::FastFlags => self.fast_flags_page(ui),
@@ -820,30 +921,20 @@ impl RuststrapApp {
                     egui::TextEdit::multiline(&mut self.import_text)
                         .hint_text("{\"FFlagExample\": \"True\"}"),
                 );
-                if ui.add_sized(BUTTON_SIZE, egui::Button::new("Choose file...")).clicked() {
-                    let picked = rfd::FileDialog::new()
-                        .add_filter("Fast flags JSON", &["json"])
-                        .set_title("Import FastFlags")
-                        .pick_file();
-                    if let Some(file) = picked {
-                        match std::fs::read_to_string(&file)
-                            .map_err(|e| e.to_string())
-                            .and_then(|text| parse_flags_json(&text).ok_or_else(|| "not a JSON object of flag names to values".to_string()))
-                        {
-                            Ok((map, count)) => {
-                                self.fflags.extend(map);
-                                self.flag_edits.clear();
-                                self.flag_dirty = true;
-                                self.dialog_error = None;
-                                self.add_dialog_open = false;
-                                self.import_text.clear();
-                                logger::info(&format!("Imported {count} flags from {}", file.display()));
-                            }
-                            Err(e) => {
-                                self.dialog_error = Some(format!("Import failed: {e}"));
-                            }
-                        }
-                    }
+                if ui
+                    .add_enabled(
+                        self.picking.is_none(),
+                        egui::Button::new("Choose file...").min_size(BUTTON_SIZE.into()),
+                    )
+                    .clicked()
+                {
+                    self.open_file_dialog(
+                        FilePickTarget::FlagsImport,
+                        "Import FastFlags",
+                        "Fast flags JSON",
+                        &["json"],
+                        None,
+                    );
                 }
                 if ui.add_sized(BUTTON_SIZE, egui::Button::new("Import")).clicked() {
                     match serde_json::from_str::<Value>(&self.import_text) {
@@ -936,32 +1027,35 @@ impl RuststrapApp {
             if ui.add_sized(BUTTON_SIZE, egui::Button::new("Reload")).clicked() {
                 self.reload_gbs();
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Import XML...")).clicked() {
-                let picked = rfd::FileDialog::new()
-                    .add_filter("Roblox settings", &["xml"])
-                    .set_title("Import Roblox settings")
-                    .pick_file();
-                if let Some(file) = picked {
-                    match gbs::Gbs::import(&file) {
-                        Ok(()) => self.reload_gbs(),
-                        Err(e) => logger::error(&format!("Failed to import Roblox settings: {e}")),
-                    }
-                }
+            if ui
+                .add_enabled(
+                    self.picking.is_none(),
+                    egui::Button::new("Import XML...").min_size(BUTTON_SIZE.into()),
+                )
+                .clicked()
+            {
+                self.open_file_dialog(
+                    FilePickTarget::RobloxImport,
+                    "Import Roblox settings",
+                    "Roblox settings",
+                    &["xml"],
+                    None,
+                );
             }
-            if ui.add_sized(BUTTON_SIZE, egui::Button::new("Export XML...")).clicked() {
-                let picked = rfd::FileDialog::new()
-                    .add_filter("Roblox settings", &["xml"])
-                    .set_file_name("GlobalBasicSettings_13.xml")
-                    .set_title("Export Roblox settings")
-                    .save_file();
-                if let Some(file) = picked {
-                    let doc = gbs::Gbs {
-                        raw: self.gbs.raw.clone(),
-                    };
-                    if let Err(e) = doc.export(&file) {
-                        logger::error(&format!("Failed to export Roblox settings: {e}"));
-                    }
-                }
+            if ui
+                .add_enabled(
+                    self.picking.is_none(),
+                    egui::Button::new("Export XML...").min_size(BUTTON_SIZE.into()),
+                )
+                .clicked()
+            {
+                self.open_file_dialog(
+                    FilePickTarget::RobloxExport,
+                    "Export Roblox settings",
+                    "Roblox settings",
+                    &["xml"],
+                    Some("GlobalBasicSettings_13.xml"),
+                );
             }
             if ui.add_sized(BUTTON_SIZE, egui::Button::new("Open file location")).clicked() {
                 open_folder(
@@ -1483,5 +1577,95 @@ fn open_folder(path: std::path::PathBuf) {
     };
     if let Err(e) = result {
         logger::error(&format!("Cannot open {}: {e}", path.display()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_scroll_fills_central_panel() {
+        let ctx = egui::Context::default();
+        let observed: std::rc::Rc<std::cell::RefCell<Vec<(f32, f32, egui::Rect)>>> =
+            Default::default();
+        for window_height in [600.0, 900.0] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(800.0, window_height),
+                )),
+                ..Default::default()
+            };
+            let record = observed.clone();
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("nav").resizable(false).show(ui, |ui| {
+                    ui.label("nav");
+                });
+                let resp = egui::CentralPanel::default_margins().show(ui, |ui| {
+                    let scroll = egui::ScrollArea::vertical()
+                        .id_salt("page")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for i in 0..200 {
+                                ui.label(format!("item {i}"));
+                            }
+                        });
+                    (scroll, ui.max_rect().height())
+                });
+                record.borrow_mut().push((
+                    resp.response.rect.max.y,
+                    resp.inner.1,
+                    resp.inner.0.inner_rect,
+                ));
+            });
+            output.drop_without_applying_deltas();
+        }
+        for (panel_bottom, inner_height, viewport) in observed.borrow().iter() {
+            assert_eq!(panel_bottom - inner_height, 16.0, "panel frame bottom must match the panel inner rect plus both margins");
+            assert!(viewport.max.y <= panel_bottom + 0.01, "scroll viewport must not spill below the panel");
+            assert!(
+                (viewport.height() - inner_height).abs() < 32.0,
+                "scroll viewport fills the panel: no dead band, got {} vs {}",
+                viewport.height(),
+                inner_height
+            );
+        }
+    }
+
+    #[test]
+    fn page_content_scrolls_when_taller_than_window() {
+        let ctx = egui::Context::default();
+        let observed: std::rc::Rc<std::cell::RefCell<Option<(f32, f32)>>> = Default::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let record = observed.clone();
+        let output = ctx.run_ui(input, |ui| {
+            egui::Panel::left("nav").resizable(false).show(ui, |ui| {
+                ui.label("nav");
+            });
+            egui::CentralPanel::default_margins().show(ui, |scroll_ui| {
+                let scroll = egui::ScrollArea::vertical()
+                    .id_salt("page")
+                    .auto_shrink([false, false])
+                    .show(scroll_ui, |ui| {
+                        for i in 0..200 {
+                            ui.label(format!("item {i}"));
+                        }
+                    });
+                *record.borrow_mut() = Some((scroll.inner_rect.height(), scroll.content_size.y));
+            });
+        });
+        output.drop_without_applying_deltas();
+        let (viewport, content) = observed.borrow().expect("pass recorded");
+        assert!(
+            content > viewport + 50.0,
+            "content ({content}) must exceed viewport ({viewport}) so it scrolls"
+        );
     }
 }
