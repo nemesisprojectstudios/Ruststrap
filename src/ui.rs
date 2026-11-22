@@ -147,11 +147,10 @@ struct RuststrapApp {
 }
 
 /// Sober's own options (Froststrap's SoberSettingsManager preset keys).
-const SOBER_TOGGLES: [(&str, &str); 11] = [
+const SOBER_TOGGLES: [(&str, &str); 10] = [
     ("Allow gamepad permission", "allow_gamepad_permission"),
     ("Enable GameMode", "enable_gamemode"),
     ("Enable HiDPI", "enable_hidpi"),
-    ("Touch mode", "touch_mode"),
     ("Use console experience", "use_console_experience"),
     ("Use libsecret", "use_libsecret"),
     ("Use OpenGL", "use_opengl"),
@@ -1375,8 +1374,21 @@ impl RuststrapApp {
             return;
         }
         let mut config = sober::load_config(paths::get());
-        for (_, key, on) in &self.sober_toggles {
-            config.insert(key.to_string(), Value::Bool(*on));
+        let toggles = self
+            .sober_toggles
+            .iter()
+            .map(|(_, key, on)| (key.to_string(), *on))
+            .collect::<Vec<_>>();
+        let skipped = sober::apply_bool_toggles(&mut config, &toggles);
+        for key in skipped {
+            logger::warn(&format!(
+                "Sober option {key} is not a boolean in config.json; left untouched"
+            ));
+        }
+        if sober::coerce_bool_to_string(&mut config, "touch_mode", "off", "on") {
+            logger::warn(
+                "Repaired touch_mode in Sober config (a previous release wrote it as a boolean)",
+            );
         }
         match sober::save_config(paths::get(), &config) {
             Ok(()) => logger::info("Sober settings saved"),

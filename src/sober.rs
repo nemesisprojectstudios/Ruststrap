@@ -233,6 +233,43 @@ pub fn save_config(paths: &Paths, config: &Map<String, Value>) -> Result<(), Str
     Ok(())
 }
 
+/// Merges boolean toggles into the config. Sober's config parser is strictly
+/// typed and exits when a value has the wrong type (touch_mode is a string
+/// enum, graphics_optimization_mode a string), so keys that already hold a
+/// non-boolean value are reported back and left untouched.
+pub fn apply_bool_toggles(
+    config: &mut Map<String, Value>,
+    toggles: &[(String, bool)],
+) -> Vec<String> {
+    let mut skipped = Vec::new();
+    for (key, on) in toggles {
+        match config.get(key) {
+            None | Some(Value::Bool(_)) => {
+                config.insert(key.clone(), Value::Bool(*on));
+            }
+            Some(_) => skipped.push(key.clone()),
+        }
+    }
+    skipped
+}
+
+/// Repairs a key that an older release wrote as a boolean although Sober
+/// expects a string, mapping false/true to the given enum values. Returns
+/// true when a repair was applied.
+pub fn coerce_bool_to_string(
+    config: &mut Map<String, Value>,
+    key: &str,
+    off: &str,
+    on: &str,
+) -> bool {
+    if let Some(Value::Bool(value)) = config.get(key) {
+        let text = if *value { on } else { off };
+        config.insert(key.to_string(), Value::String(text.to_string()));
+        return true;
+    }
+    false
+}
+
 /// Reads a Sober config key, accepting typed or string-encoded booleans.
 pub fn config_bool(config: &Map<String, Value>, key: &str) -> Option<bool> {
     match config.get(key) {
@@ -303,5 +340,54 @@ mod tests {
     #[test]
     fn parse_config_reports_broken_json() {
         assert!(parse_config("{fflags:}").is_err());
+    }
+
+    #[test]
+    fn bool_toggles_never_clobber_non_boolean_values() {
+        let mut config = Map::new();
+        config.insert("touch_mode".to_string(), Value::String("off".to_string()));
+        config.insert("enable_hidpi".to_string(), Value::Bool(false));
+        let toggles = vec![
+            ("touch_mode".to_string(), true),
+            ("enable_hidpi".to_string(), true),
+            ("close_on_leave".to_string(), true),
+        ];
+        let skipped = apply_bool_toggles(&mut config, &toggles);
+        assert_eq!(skipped, vec!["touch_mode".to_string()]);
+        assert_eq!(config["touch_mode"], json!("off"));
+        assert_eq!(config["enable_hidpi"], json!(true));
+        assert_eq!(config["close_on_leave"], json!(true));
+    }
+
+    #[test]
+    fn coerces_boolean_touch_mode_back_to_string() {
+        let mut config = Map::new();
+        config.insert("touch_mode".to_string(), Value::Bool(false));
+        assert!(coerce_bool_to_string(
+            &mut config,
+            "touch_mode",
+            "off",
+            "on"
+        ));
+        assert_eq!(config["touch_mode"], json!("off"));
+        config.insert("touch_mode".to_string(), Value::Bool(true));
+        assert!(coerce_bool_to_string(
+            &mut config,
+            "touch_mode",
+            "off",
+            "on"
+        ));
+        assert_eq!(config["touch_mode"], json!("on"));
+        config.insert(
+            "touch_mode".to_string(),
+            Value::String("fake-off".to_string()),
+        );
+        assert!(!coerce_bool_to_string(
+            &mut config,
+            "touch_mode",
+            "off",
+            "on"
+        ));
+        assert_eq!(config["touch_mode"], json!("fake-off"));
     }
 }
