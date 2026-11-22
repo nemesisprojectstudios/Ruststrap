@@ -11,7 +11,8 @@
 //! window when started without arguments or with --ui.
 
 // mimalloc keeps the egui per-frame allocation churn from inflating resident
-// memory the way glibc/UCRT arenas do
+// memory on Windows; on glibc it measured worse, so Linux keeps the default
+#[cfg(windows)]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
