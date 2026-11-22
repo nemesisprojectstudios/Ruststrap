@@ -24,93 +24,7 @@ pub fn launch(
     launch_args: &str,
 ) -> Result<Option<Child>, String> {
     if cfg!(windows) {
-        let exe = version_dir.join(crate::packages::executable_name(is_studio));
-        logger::info(&format!("Starting Roblox: {}", exe.display()));
-        verify_version_configs(version_dir);
-        verify_core_files(version_dir, is_studio);
-        let mut command = std::process::Command::new(&exe);
-        command.current_dir(version_dir);
-        if !launch_args.is_empty() {
-            command.arg(launch_args);
-            logger::info(&format!("Launch arguments: {launch_args}"));
-        } else if !is_studio {
-            // the stock desktop shortcut launches the home screen the same way
-            command.arg("--app");
-            logger::info("No launch arguments: opening the Roblox home screen (--app)");
-        }
-        // keep the client's own stdout/stderr instead of discarding them: any
-        // pre-log CRT/loader output lands in this file for diagnostic dumps
-        let stdio_path = paths.logs.join("client-stdio.log");
-        match std::fs::File::create(&stdio_path) {
-            Ok(file) => match file.try_clone() {
-                Ok(dup) => {
-                    logger::info(&format!(
-                        "Capturing client stdio to {}",
-                        stdio_path.display()
-                    ));
-                    command.stdout(file);
-                    command.stderr(dup);
-                }
-                Err(e) => {
-                    logger::warn(&format!("Cannot share stdio file handle: {e}"));
-                    command.stdout(std::process::Stdio::null());
-                    command.stderr(std::process::Stdio::null());
-                }
-            },
-            Err(e) => {
-                logger::warn(&format!(
-                    "Cannot create {}: {e}; client stdio will be discarded",
-                    stdio_path.display()
-                ));
-                command.stdout(std::process::Stdio::null());
-                command.stderr(std::process::Stdio::null());
-            }
-        }
-        match command.spawn() {
-            Ok(mut child) => {
-                let spawn_time = SystemTime::now();
-                let deadline = Instant::now() + EARLY_EXIT_WINDOW;
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            let description = describe_exit_code(status.code());
-                            logger::error(&format!(
-                                "Roblox exited early: {description} (raw status: {status})"
-                            ));
-                            if status.code() == Some(0)
-                                && crate::processes::image_running(
-                                    crate::processes::roblox_player_image(),
-                                )
-                            {
-                                logger::info(
-                                    "Another Roblox client process is running; the new client likely handed its session over to it",
-                                );
-                            }
-                            harvest_client_stdio(paths);
-                            harvest_client_logs(paths, is_studio, spawn_time);
-                            harvest_event_log();
-                            return Ok(None);
-                        }
-                        Ok(None) if Instant::now() < deadline => {
-                            std::thread::sleep(Duration::from_millis(500));
-                        }
-                        Ok(None) => {
-                            logger::info(&format!("Roblox is running (PID {})", child.id()));
-                            return Ok(Some(child));
-                        }
-                        Err(e) => {
-                            logger::warn(&format!("Could not poll Roblox: {e}"));
-                            return Ok(Some(child));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                // a broken executable gets removed so the next run reinstalls cleanly
-                let _ = std::fs::remove_file(&exe);
-                Err(format!("Failed to start Roblox: {e}"))
-            }
-        }
+        run_windows_client(paths, version_dir, is_studio, launch_args)
     } else if is_studio {
         launch_studio_via_wine(paths, version_dir, launch_args)
     } else {
@@ -249,14 +163,25 @@ fn harvest_client_stdio(paths: &Paths) {
     logger::error("--- end of client stdio ---");
 }
 
-/// Last few Application event-log error records; anything mentioning the
-/// Roblox client is logged. Catches WER/EventLog evidence even when the
-/// client leaves no log of its own.
+/// Queries event-log error records; anything mentioning the Roblox client is
+/// logged. Besides Application (WER/crashes), Defender's operational log and
+/// AppLocker are checked because security blocks against freshly spawned
+/// clients often leave records only there.
 fn harvest_event_log() {
-    let Ok(output) = std::process::Command::new("wevtutil")
+    for (channel, label) in [
+        ("Application", "Application"),
+        ("Microsoft-Windows-Windows Defender/Operational", "Defender"),
+        ("Microsoft-Windows-AppLocker/EXE and DLL", "AppLocker"),
+    ] {
+        harvest_event_log_channel(channel, label);
+    }
+}
+
+fn harvest_event_log_channel(channel: &str, label: &str) {
+    let output = match std::process::Command::new("wevtutil")
         .args([
             "qe",
-            "Application",
+            channel,
             "/q:*[System[(EventID=1000 or EventID=1001 or EventID=1002)]]",
             "/c:5",
             "/rd:true",
@@ -265,9 +190,14 @@ fn harvest_event_log() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
-    else {
-        logger::warn("Could not query the Application event log (wevtutil)");
-        return;
+    {
+        Ok(output) if output.status.success() => output,
+        _ => {
+            logger::warn(&format!(
+                "Could not read the {label} event log (needs more rights or is unavailable)"
+            ));
+            return;
+        }
     };
     let text = String::from_utf8_lossy(&output.stdout);
     let relevant: Vec<&str> = text
@@ -275,13 +205,223 @@ fn harvest_event_log() {
         .filter(|line| line.to_ascii_lowercase().contains("roblox"))
         .collect();
     if relevant.is_empty() {
-        logger::info("No Roblox-related error records in the Application event log");
+        logger::info(&format!(
+            "No Roblox-related error records in the {label} event log"
+        ));
         return;
     }
-    logger::error("--- Application event log records mentioning Roblox ---");
+    logger::error(&format!(
+        "--- {label} event log records mentioning Roblox ---"
+    ));
     for line in relevant.iter().take(40) {
-        logger::error(&format!("[EventLog] {line}"));
+        logger::error(&format!("[{label}] {line}"));
     }
+}
+
+/// Result of one spawn+monitor cycle.
+enum AttemptOutcome {
+    Running(std::process::Child),
+    Exited(std::process::ExitStatus),
+    SpawnErr(String),
+}
+
+/// The full Windows launch procedure. When the very first attempt dies with a
+/// bare code 1 before Roblox writes anything, two differential retries run so
+/// the log names the culprit instead of the user guessing: a launch-URI form
+/// and a run with the FastFlags file temporarily disabled (always restored).
+fn run_windows_client(
+    paths: &'static Paths,
+    version_dir: &Path,
+    is_studio: bool,
+    launch_args: &str,
+) -> Result<Option<Child>, String> {
+    let exe = version_dir.join(crate::packages::executable_name(is_studio));
+    logger::info(&format!("Starting Roblox: {}", exe.display()));
+    verify_version_configs(version_dir);
+    verify_core_files(version_dir, is_studio);
+
+    let primary_args: Option<String> = if !launch_args.is_empty() {
+        logger::info(&format!("Launch arguments: {launch_args}"));
+        Some(launch_args.to_string())
+    } else if !is_studio {
+        // the stock desktop shortcut launches the home screen the same way
+        logger::info("No launch arguments: opening the Roblox home screen (--app)");
+        Some("--app".to_string())
+    } else {
+        None
+    };
+
+    let primary = attempt_client(
+        paths,
+        version_dir,
+        is_studio,
+        primary_args.as_deref(),
+        "Launch",
+    );
+    match primary {
+        AttemptOutcome::Running(child) => return Ok(Some(child)),
+        AttemptOutcome::SpawnErr(e) => {
+            // a broken executable gets removed so the next run reinstalls cleanly
+            let _ = std::fs::remove_file(&exe);
+            return Err(format!("Failed to start Roblox: {e}"));
+        }
+        AttemptOutcome::Exited(status) => {
+            log_early_exit(paths, is_studio, &status);
+            if status.code() != Some(1) || is_studio {
+                return Ok(None);
+            }
+        }
+    }
+
+    // Differential retry 1: the protocol-string form the client receives when
+    // it is the registered protocol handler.
+    logger::info("Diagnostic retry 1: launching with the full roblox-player launch URI instead");
+    let uri = "roblox-player:1+launchmode:app";
+    let retry = attempt_client(
+        paths,
+        version_dir,
+        is_studio,
+        Some(uri),
+        "Diagnostic retry 1",
+    );
+    match retry {
+        AttemptOutcome::Running(child) => {
+            logger::info(
+                "The client survives with the roblox-player launch URI: use this form whenever argument-less launches fail",
+            );
+            return Ok(Some(child));
+        }
+        AttemptOutcome::SpawnErr(e) => return Err(format!("Failed to start Roblox: {e}")),
+        AttemptOutcome::Exited(status) => log_early_exit(paths, is_studio, &status),
+    }
+
+    // Differential retry 2: no FastFlags file. Restored afterwards no matter
+    // what happened.
+    let fflags = version_dir
+        .join("ClientSettings")
+        .join("ClientAppSettings.json");
+    let backup = version_dir
+        .join("ClientSettings")
+        .join("ClientAppSettings.json.ruststrap-diag");
+    let moved = std::fs::rename(&fflags, &backup).is_ok();
+    if moved {
+        logger::info(
+            "Diagnostic retry 2: launching with ClientAppSettings.json temporarily disabled",
+        );
+    }
+    let retry = attempt_client(
+        paths,
+        version_dir,
+        is_studio,
+        primary_args.as_deref(),
+        "Diagnostic retry 2",
+    );
+    if moved {
+        let _ = std::fs::rename(&backup, &fflags);
+        logger::info("ClientAppSettings.json restored");
+    }
+    match retry {
+        AttemptOutcome::Running(child) => {
+            logger::error(
+                "RESULT: the client survives without ClientAppSettings.json - your FastFlags content terminates the client (Ruststrap restores and keeps the file; trim or fix the flags)",
+            );
+            return Ok(Some(child));
+        }
+        AttemptOutcome::SpawnErr(e) => return Err(format!("Failed to start Roblox: {e}")),
+        AttemptOutcome::Exited(status) => log_early_exit(paths, is_studio, &status),
+    }
+
+    logger::error(
+        "RESULT: every launch attempt exits with code 1 before Roblox writes anything. This pattern is security software terminating the client at spawn, or a Hyperion early rejection - the client produced no log, no stdio and no event record. Check Windows Security > Protection history and any third-party antivirus, and try double-clicking RobloxPlayerBeta.exe directly in the version folder",
+    );
+    Ok(None)
+}
+
+/// One spawn + up-to-15s monitor cycle.
+fn attempt_client(
+    paths: &Paths,
+    version_dir: &Path,
+    is_studio: bool,
+    args: Option<&str>,
+    label: &str,
+) -> AttemptOutcome {
+    let exe = version_dir.join(crate::packages::executable_name(is_studio));
+    logger::info(&format!(
+        "{label}: spawning {} (cwd {})",
+        exe.display(),
+        version_dir.display()
+    ));
+    let mut command = std::process::Command::new(&exe);
+    command.current_dir(version_dir);
+    if let Some(args) = args {
+        command.arg(args);
+    }
+    // keep the client's own stdout/stderr instead of discarding them: any
+    // pre-log CRT/loader output lands in this file for diagnostic dumps
+    let stdio_path = paths.logs.join("client-stdio.log");
+    match std::fs::File::create(&stdio_path) {
+        Ok(file) => match file.try_clone() {
+            Ok(dup) => {
+                logger::info(&format!(
+                    "Capturing client stdio to {}",
+                    stdio_path.display()
+                ));
+                command.stdout(file);
+                command.stderr(dup);
+            }
+            Err(e) => {
+                logger::warn(&format!("Cannot share stdio file handle: {e}"));
+                command.stdout(std::process::Stdio::null());
+                command.stderr(std::process::Stdio::null());
+            }
+        },
+        Err(e) => {
+            logger::warn(&format!(
+                "Cannot create {}: {e}; client stdio will be discarded",
+                stdio_path.display()
+            ));
+            command.stdout(std::process::Stdio::null());
+            command.stderr(std::process::Stdio::null());
+        }
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => return AttemptOutcome::SpawnErr(e.to_string()),
+    };
+    let deadline = Instant::now() + EARLY_EXIT_WINDOW;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return AttemptOutcome::Exited(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Ok(None) => {
+                logger::info(&format!("Roblox is running (PID {})", child.id()));
+                return AttemptOutcome::Running(child);
+            }
+            Err(e) => {
+                logger::warn(&format!("Could not poll Roblox: {e}"));
+                return AttemptOutcome::Running(child);
+            }
+        }
+    }
+}
+
+fn log_early_exit(paths: &Paths, is_studio: bool, status: &std::process::ExitStatus) {
+    let description = describe_exit_code(status.code());
+    logger::error(&format!(
+        "Roblox exited early: {description} (raw status: {status})"
+    ));
+    if status.code() == Some(0)
+        && crate::processes::image_running(crate::processes::roblox_player_image())
+    {
+        logger::info(
+            "Another Roblox client process is running; the new client likely handed its session over to it",
+        );
+    }
+    harvest_client_stdio(paths);
+    harvest_client_logs(paths, is_studio, SystemTime::now() - EARLY_EXIT_WINDOW);
+    harvest_event_log();
 }
 
 /// Windows termination codes decoded into plain log text; the raw code is
