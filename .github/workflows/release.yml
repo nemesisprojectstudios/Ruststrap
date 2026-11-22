@@ -62,13 +62,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # create the release on whichever job wins the race; upload on both.
+          # the create must not abort the script (errexit) when the other job
+          # created the release between the view and the create.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "Ruststrap $TAG" --generate-notes || true
+          fi
           for asset in "$DIR.$EXT" "$DIR.$EXT.sha256"; do
             for i in 1 2 3; do
-              # create the release on whichever job wins the race; upload on both
-              gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Ruststrap $TAG" --generate-notes
               if gh release upload "$TAG" "$asset" --clobber; then
                 break
               fi
               sleep 10
             done
           done
+          # both assets must really be attached, or this job fails visibly
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fx "$DIR.$EXT"
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fx "$DIR.$EXT.sha256"
