@@ -282,10 +282,21 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Logger state is process-global (OnceLock); every test that needs it
+    /// initialized shares one directory and a mutex so parallel tests agree
+    /// (same pattern as the progress tests' TEST_LOCK).
+    fn shared_log_dir() -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
+        static DIR: OnceLock<PathBuf> = OnceLock::new();
+        static LOCK: Mutex<()> = Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = DIR.get_or_init(|| temp_dir("shared")).clone();
+        logger_init_for_test(dir.clone());
+        (dir, guard)
+    }
+
     #[test]
     fn init_writes_latest_link_at_the_active_file() {
-        let dir = temp_dir("latest");
-        logger_init_for_test(dir.clone());
+        let (dir, _guard) = shared_log_dir();
         let active = file_path().unwrap();
         assert!(active.is_file());
         let latest = dir.join(LATEST_NAME);
@@ -305,8 +316,7 @@ mod tests {
 
     #[test]
     fn consecutive_duplicate_lines_are_written_once() {
-        let dir = temp_dir("dedup");
-        init(dir);
+        let (_dir, _guard) = shared_log_dir();
         let before = recent().len();
         log("INFO", "dedupe-probe");
         log("INFO", "dedupe-probe");
