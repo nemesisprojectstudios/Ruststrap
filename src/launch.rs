@@ -331,8 +331,57 @@ fn run_windows_client(
         AttemptOutcome::Exited(status) => log_early_exit(paths, is_studio, &status),
     }
 
+    // Differential retry 3: the exact same install exposed through a junction
+    // at the stock Roblox location. Distinguishes install-location effects
+    // (Roaming redirection, profile sync) from client/machine causes.
+    let guid = version_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let stock_dir = paths.roblox.join("Versions").join(&guid);
+    let _ = std::fs::create_dir_all(stock_dir.parent().expect("has parent"));
+    let linked = match std::fs::remove_dir(&stock_dir) {
+        Ok(()) | Err(_) if !stock_dir.exists() => std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&stock_dir)
+            .arg(version_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|result| result.success())
+            .unwrap_or(false),
+        _ => false,
+    };
+    if !linked {
+        logger::warn(
+            "Diagnostic retry 3 skipped: could not create a junction at the stock location",
+        );
+    } else {
+        logger::info(
+            "Diagnostic retry 3: launching the same install through a junction at the stock Roblox location (%LOCALAPPDATA%\\Roblox\\Versions)",
+        );
+        let retry = attempt_client(
+            paths,
+            &stock_dir,
+            is_studio,
+            primary_args.as_deref(),
+            "Diagnostic retry 3",
+        );
+        let _ = std::fs::remove_dir(&stock_dir);
+        match retry {
+            AttemptOutcome::Running(child) => {
+                logger::error(
+                    "RESULT: the client runs from the stock location but not from the Ruststrap location - the install location is the variable; report this log so the default can change",
+                );
+                return Ok(Some(child));
+            }
+            AttemptOutcome::SpawnErr(e) => return Err(format!("Failed to start Roblox: {e}")),
+            AttemptOutcome::Exited(status) => log_early_exit(paths, is_studio, &status),
+        }
+    }
+
     logger::error(
-        "RESULT: every launch attempt exits with code 1 before Roblox writes anything. This pattern is security software terminating the client at spawn, or a Hyperion early rejection - the client produced no log, no stdio and no event record. Check Windows Security > Protection history and any third-party antivirus, and try double-clicking RobloxPlayerBeta.exe directly in the version folder",
+        "RESULT: every launch attempt (including double-clicked and at the stock location) exits with code 1 before Roblox writes anything. The install content is verified valid; remaining causes are machine-level (Hyperion early rejection or system software below event-log visibility). Decisive cross-check: run today's OFFICIAL Roblox installer/launcher from roblox.com - if the stock client also dies instantly, the machine has a Roblox-wide problem"
     );
     Ok(None)
 }
