@@ -4,10 +4,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::logger;
 use crate::paths::Paths;
 use crate::state::Settings;
+
+/// How long a freshly spawned client is watched for an immediate exit; a
+/// client that survives this long is healthy (logs already go to its own
+/// `%LOCALAPPDATA%/Roblox/Logs` files).
+const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(15);
 
 /// Launches the game and returns a handle to wait on (None when the process
 /// detached). The returned `Option<Child>` is None for Windows Store-style launches.
@@ -26,6 +32,7 @@ pub fn launch(
                  join a game from the website or a game shortcut to play",
             );
         }
+        verify_version_configs(version_dir);
         let mut command = std::process::Command::new(&exe);
         command.current_dir(version_dir);
         command.stdout(std::process::Stdio::null());
@@ -34,16 +41,32 @@ pub fn launch(
             command.arg(launch_args);
         }
         match command.spawn() {
-            Ok(mut child) => match child.try_wait() {
-                Ok(Some(status)) => {
-                    logger::warn(&format!(
-                        "Roblox exited immediately with {status}; \
-                         check your FastFlags and the install (use force reinstall)"
-                    ));
-                    Ok(None)
+            Ok(mut child) => {
+                let spawn_time = SystemTime::now();
+                let deadline = Instant::now() + EARLY_EXIT_WINDOW;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            logger::error(&format!(
+                                "Roblox exited early with {status}; client log follows"
+                            ));
+                            harvest_client_logs(paths, spawn_time);
+                            return Ok(None);
+                        }
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
+                        Ok(None) => {
+                            logger::info(&format!("Roblox is running (PID {})", child.id()));
+                            return Ok(Some(child));
+                        }
+                        Err(e) => {
+                            logger::warn(&format!("Could not poll Roblox: {e}"));
+                            return Ok(Some(child));
+                        }
+                    }
                 }
-                _ => Ok(Some(child)),
-            },
+            }
             Err(e) => {
                 // a broken executable gets removed so the next run reinstalls cleanly
                 let _ = std::fs::remove_file(&exe);
@@ -119,4 +142,85 @@ fn which_wine() -> Option<PathBuf> {
 /// Applies theme + background-app settings to Roblox's client storage.
 pub fn apply_app_storage(paths: &Paths, settings: &Settings) {
     crate::appstorage::apply(paths, settings);
+}
+
+/// Sanity-checks the config files Ruststrap writes into the version directory
+/// before spawning the client: a malformed ClientAppSettings.json makes the
+/// client exit instantly, so surface the exact problem in the log.
+fn verify_version_configs(version_dir: &Path) {
+    let fflags = version_dir
+        .join("ClientSettings")
+        .join("ClientAppSettings.json");
+    if fflags.exists() {
+        match std::fs::read_to_string(&fflags) {
+            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(serde_json::Value::Object(map)) => {
+                    logger::info(&format!(
+                        "ClientAppSettings.json is valid ({} flags)",
+                        map.len()
+                    ));
+                }
+                Ok(_) => logger::warn("ClientAppSettings.json is empty or not a JSON object"),
+                Err(e) => logger::error(&format!("ClientAppSettings.json is invalid: {e}")),
+            },
+            Err(e) => logger::error(&format!("Cannot read ClientAppSettings.json: {e}")),
+        }
+    }
+}
+
+/// Prints the tail of the newest Roblox-created log under
+/// `<Roblox data dir>/Logs` so the client's own crash reason ends up in the
+/// Ruststrap log the user can see.
+fn harvest_client_logs(paths: &Paths, after: SystemTime) {
+    let dir = paths.roblox.join("Logs");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            logger::warn(&format!(
+                "No Roblox log directory found at {}",
+                dir.display()
+            ));
+            return;
+        }
+    };
+    const SLOP: Duration = Duration::from_secs(2);
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+            continue;
+        }
+        let ok = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .filter(|mtime| *mtime + SLOP >= after);
+        if let Some(mtime) = ok {
+            if newest.as_ref().is_none_or(|(best, _)| mtime > *best) {
+                newest = Some((mtime, path));
+            }
+        }
+    }
+    let (_, path) = match newest {
+        Some(newest) => newest,
+        None => {
+            logger::warn("No Roblox client log was written for this launch");
+            return;
+        }
+    };
+    logger::error(&format!("Roblox client log: {}", path.display()));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => {
+            logger::error(&format!("Cannot read Roblox client log: {e}"));
+            return;
+        }
+    };
+    const TAIL_LINES: usize = 50;
+    let tail: Vec<&str> = text.lines().rev().take(TAIL_LINES).collect();
+    logger::error(&format!("--- last {} lines ---", tail.len()));
+    for line in tail.iter().rev() {
+        logger::error(&format!("[Roblox] {line}"));
+    }
+    logger::error("--- end of Roblox client log ---");
 }

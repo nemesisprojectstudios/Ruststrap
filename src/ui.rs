@@ -2148,28 +2148,32 @@ impl RuststrapApp {
 
 fn version_row(ui: &mut egui::Ui, label: &str, installed: &str, latest: Option<&str>) {
     ui.label(label);
+    // display the hash without the shared "version-" prefix
+    let hash = |guid: &str| guid.trim_start_matches("version-").to_string();
     let installed = if installed.is_empty() {
-        "not installed"
+        "not installed".to_string()
     } else {
-        &installed[..8.min(installed.len())]
+        hash(installed)
     };
     match latest {
         Some(latest) => {
-            let up_to_date = installed.eq_ignore_ascii_case(&latest[..8.min(latest.len())]);
+            let latest = hash(latest);
+            let up_to_date = installed.eq_ignore_ascii_case(&latest);
             if up_to_date {
                 ui.label(
-                    egui::RichText::new(installed).color(egui::Color32::from_rgb(0x70, 0xC0, 0x70)),
+                    egui::RichText::new(&installed)
+                        .color(egui::Color32::from_rgb(0x70, 0xC0, 0x70)),
                 );
                 ui.label("up to date");
             } else {
-                ui.label(installed);
+                ui.label(&installed);
                 ui.label(
                     egui::RichText::new(format!("latest {latest}")).color(egui::Color32::YELLOW),
                 );
             }
         }
         None => {
-            ui.label(installed);
+            ui.label(&installed);
             ui.label("");
         }
     }
