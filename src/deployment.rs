@@ -47,6 +47,11 @@ pub fn is_default_channel(channel: &str) -> bool {
     channel.eq_ignore_ascii_case(DEFAULT_CHANNEL) || channel.eq_ignore_ascii_case("live")
 }
 
+/// Channel-availability probes always use a binary type whose deployment info
+/// is public: the mobile endpoints reject unauthenticated requests for every
+/// channel, so they cannot signal availability.
+pub const CHANNEL_PROBE_BINARY: &str = "WindowsPlayer";
+
 /// Probes mirrors in order and returns the first that answers, doubling as the
 /// connectivity check. Falls back to the primary mirror address on total failure.
 pub fn resolve_base_url(http: &Http) -> String {

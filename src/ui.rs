@@ -671,13 +671,18 @@ impl RuststrapApp {
                 }
             };
             let decode = |is_studio: bool| {
-                crate::deployment::get_user_channel(
-                    &http,
-                    &guard.settings,
-                    crate::packages::binary_type(is_studio),
-                )
+                // the player is Sober's mobile client on Linux, whose account
+                // channel is reported under its own binary type
+                let binary = if is_studio {
+                    crate::packages::binary_type(true)
+                } else if cfg!(windows) {
+                    crate::packages::binary_type(false)
+                } else {
+                    crate::sober::ROBLOX_BINARY_TYPE
+                };
+                crate::deployment::get_user_channel(&http, &guard.settings, binary)
             };
-            let player = if cfg!(windows) { decode(false) } else { None };
+            let player = decode(false);
             let studio = decode(true);
             let _ = tx.send(WorkerMsg::UserChannels { player, studio });
         });
@@ -685,6 +690,9 @@ impl RuststrapApp {
 
     /// Probes every known channel for live deployment info. Roblox has no
     /// public channel-list endpoint, so availability = a version answers.
+    /// The mobile endpoints reject unauthenticated requests for every
+    /// channel, so availability is probed via the public Windows deploy
+    /// info; Sober's own channel comes from the user-channel job.
     fn probe_channels_job(&mut self) {
         self.spawn_job("Probing channels", move |shared, tx| {
             let http = Http::new();
@@ -698,13 +706,13 @@ impl RuststrapApp {
                 roblox_domain: domain,
                 ..Default::default()
             };
-            let mut probes: Vec<(&'static str, Option<String>)> = Vec::new();
+            let mut probes = Vec::new();
             for channel in KNOWN_CHANNELS {
                 match crate::deployment::get_client_version(
                     &http,
                     &settings,
                     channel,
-                    crate::packages::binary_type(false),
+                    crate::deployment::CHANNEL_PROBE_BINARY,
                 ) {
                     Ok(info) => probes.push((channel, Some(info.version))),
                     Err(_) => probes.push((channel, None)),
@@ -1017,33 +1025,6 @@ impl RuststrapApp {
             serde_json::to_string_pretty(&Value::Object(self.fflags.clone())).unwrap_or_default();
 
         ui.horizontal_wrapped(|ui| {
-            let mut disable_captures = self
-                .fflags
-                .get(fastflags::CAPTURE_DISABLE_FLAG)
-                .and_then(Value::as_str)
-                .map(|value| value.eq_ignore_ascii_case("false"))
-                .unwrap_or(false);
-            if ui
-                .checkbox(
-                    &mut disable_captures,
-                    "Disable screenshots & video (best-effort)",
-                )
-                .changed()
-            {
-                if disable_captures {
-                    self.fflags.insert(
-                        fastflags::CAPTURE_DISABLE_FLAG.to_string(),
-                        Value::String("False".to_string()),
-                    );
-                    logger::info(
-                        "Capture hotkey flag added (best-effort: not on Roblox's current allowlist)",
-                    );
-                } else {
-                    self.fflags.remove(fastflags::CAPTURE_DISABLE_FLAG);
-                    logger::info("Capture hotkey flag removed");
-                }
-                self.flag_dirty = true;
-            }
             if ui
                 .add_sized(BUTTON_SIZE, egui::Button::new("Add flag..."))
                 .clicked()
@@ -1089,12 +1070,59 @@ impl RuststrapApp {
                     self.confirm_armed_at = Some(std::time::Instant::now());
                 }
             }
+            let save_enabled = self.flag_dirty && !self.busy.load(Ordering::SeqCst);
+            if ui
+                .add_enabled(
+                    save_enabled,
+                    egui::Button::new("Save flags").min_size(BUTTON_SIZE.into()),
+                )
+                .clicked()
+            {
+                self.save_flags();
+            }
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Import JSON"))
+                .clicked()
+            {
+                self.dialog_error = None;
+                self.import_text.clear();
+                self.export_dialog_open = false;
+                self.dialog_tab = AddTab::Json;
+                self.add_dialog_open = true;
+            }
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Export JSON"))
+                .clicked()
+            {
+                self.export_text = json.clone();
+                self.export_dialog_open = true;
+            }
             if ui
                 .add_sized(BUTTON_SIZE, egui::Button::new("Copy JSON"))
                 .clicked()
             {
                 ui.ctx().copy_text(json.clone());
                 logger::info("Fast flags JSON copied to clipboard");
+            }
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_sized(
+                    BUTTON_SIZE,
+                    egui::Button::new(if cfg!(windows) {
+                        "Reload from file"
+                    } else {
+                        "Reload from Sober config"
+                    }),
+                )
+                .clicked()
+            {
+                self.reload_flags();
+                self.flag_dirty = false;
             }
             if ui
                 .add_sized(BUTTON_SIZE, egui::Button::new("Clean non-allowlisted"))
@@ -1114,62 +1142,15 @@ impl RuststrapApp {
                     "Removed {removed} flags outside Roblox's allowlist"
                 ));
             }
-            if ui
-                .add_sized(BUTTON_SIZE, egui::Button::new("Import JSON"))
-                .clicked()
-            {
-                self.dialog_error = None;
-                self.import_text.clear();
-                self.add_dialog_open = false;
-                self.export_dialog_open = false;
-                self.dialog_tab = AddTab::Json;
-                self.add_dialog_open = true;
-            }
-            if ui
-                .add_sized(BUTTON_SIZE, egui::Button::new("Export JSON"))
-                .clicked()
-            {
-                self.export_text = json.clone();
-                self.export_dialog_open = true;
-            }
-            if ui
-                .add_sized(
-                    BUTTON_SIZE,
-                    egui::Button::new(if cfg!(windows) {
-                        "Reload from file"
-                    } else {
-                        "Reload from Sober config"
-                    }),
-                )
-                .clicked()
-            {
-                self.reload_flags();
-                self.flag_dirty = false;
-            }
-            if self.confirm_delete_all
-                && self
-                    .confirm_armed_at
-                    .is_some_and(|t| t.elapsed().as_secs_f32() > 5.0)
-            {
-                self.confirm_delete_all = false;
-            }
-            let save_enabled = self.flag_dirty && !self.busy.load(Ordering::SeqCst);
-            if ui
-                .add_enabled(
-                    save_enabled,
-                    egui::Button::new("Save flags").min_size(BUTTON_SIZE.into()),
-                )
-                .clicked()
-            {
-                self.save_flags();
-            }
         });
 
-        ui.add(
-            egui::TextEdit::singleline(&mut self.flag_search)
-                .hint_text("Search")
-                .desired_width(160.0),
-        );
+        if self.confirm_delete_all
+            && self
+                .confirm_armed_at
+                .is_some_and(|t| t.elapsed().as_secs_f32() > 5.0)
+        {
+            self.confirm_delete_all = false;
+        }
 
         ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
@@ -1276,7 +1257,14 @@ impl RuststrapApp {
             })
             .collect();
 
-        ui.label(format!("{} flags", rows.len()));
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.flag_search)
+                    .hint_text("Search")
+                    .desired_width(160.0),
+            );
+            ui.label(format!("{} flags", rows.len()));
+        });
         ui.add_space(4.0);
 
         if rows.is_empty() {
@@ -1349,7 +1337,7 @@ impl RuststrapApp {
                         &if allowlisted {
                             key.clone()
                         } else {
-                            format!("⚠ {key}")
+                            format!("[ ! ] {key}")
                         },
                         font.clone(),
                         if selected {
@@ -2212,6 +2200,43 @@ impl RuststrapApp {
                     }),
                 ),
                 (
+                    "Modifications",
+                    Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
+                        let mut disable_captures = g
+                            .fflags
+                            .get(fastflags::CAPTURE_DISABLE_FLAG)
+                            .and_then(Value::as_str)
+                            .map(|value| value.eq_ignore_ascii_case("false"))
+                            .unwrap_or(false);
+                        if ui
+                            .checkbox(&mut disable_captures, "Disable screenshots & recording")
+                            .changed()
+                        {
+                            if disable_captures {
+                                g.fflags.insert(
+                                    fastflags::CAPTURE_DISABLE_FLAG.to_string(),
+                                    Value::String("False".to_string()),
+                                );
+                                logger::info(
+                                    "Capture hotkeys disabled via FastFlag (best-effort: Roblox's allowlist currently ignores it)",
+                                );
+                            } else {
+                                g.fflags.remove(fastflags::CAPTURE_DISABLE_FLAG);
+                                logger::info("Capture hotkey flag removed");
+                            }
+                            g.flag_dirty = true;
+                        }
+                        ui.weak("(best-effort: Roblox's allowlist currently ignores this flag)");
+                        g.settings_dirty |= ui
+                            .checkbox(
+                                &mut g.settings_edits.auto_rejoin,
+                                "Auto-rejoin after a disconnect",
+                            )
+                            .changed();
+                        ui.weak("Rejoins the last place up to 3 times after a disconnect.");
+                    }),
+                ),
+                (
                     "Miscellaneous",
                     Box::new(|ui: &mut egui::Ui, g: &mut RuststrapApp| {
                         gbs_bool_row(
@@ -2420,6 +2445,9 @@ impl RuststrapApp {
                                     "Your account uses: player '{player}', studio '{studio}'"
                                 ));
                             }
+                            (Some(player), None) => {
+                                ui.label(format!("Your account uses: player '{player}'"));
+                            }
                             (None, Some(studio)) => {
                                 ui.label(format!("Your account uses: studio '{studio}'"));
                             }
@@ -2482,12 +2510,6 @@ impl RuststrapApp {
                             .checkbox(
                                 &mut g.settings_edits.background_app,
                                 "Keep Roblox running in the background when closed",
-                            )
-                            .changed();
-                        g.settings_dirty |= ui
-                            .checkbox(
-                                &mut g.settings_edits.auto_rejoin,
-                                "Auto-rejoin after a disconnect",
                             )
                             .changed();
                         ui.horizontal(|ui| {

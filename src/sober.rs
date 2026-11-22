@@ -10,6 +10,9 @@ use serde_json::{Map, Value};
 use crate::logger;
 use crate::paths::{home_dir, Paths, SOBER_FLATPAK_ID};
 
+/// Sober runs Roblox's Android build; its settings endpoints use this type.
+pub const ROBLOX_BINARY_TYPE: &str = "AndroidApp";
+
 /// Sober's flatpak data root. All Sober state (config.json, GlobalBasicSettings,
 /// internal data) lives here and Ruststrap edits it in place.
 pub fn data_dir(_paths: &Paths) -> PathBuf {
