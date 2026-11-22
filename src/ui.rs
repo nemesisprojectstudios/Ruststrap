@@ -615,6 +615,12 @@ impl RuststrapApp {
 
 impl eframe::App for RuststrapApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // workers only repaint on messages; poll while one is running so the
+        // log feed and progress bar keep moving without user input
+        if self.busy.load(Ordering::SeqCst) {
+            root.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(300));
+        }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 WorkerMsg::Versions { player, studio } => {
@@ -779,7 +785,9 @@ impl RuststrapApp {
         ui.add_space(8.0);
         ui.heading("Versions");
 
-        let (player_guid, studio_guid) = match self.shared.lock() {
+        // a worker (install/uninstall) can hold the state for minutes; never
+        // block a frame on it, just fall back to empty rows until it frees up
+        let (player_guid, studio_guid) = match self.shared.try_lock() {
             Ok(guard) => (
                 guard.player_state.version_guid.clone(),
                 guard.studio_state.version_guid.clone(),
@@ -1269,8 +1277,8 @@ impl RuststrapApp {
     fn revert_changes(&mut self) {
         self.reload_flags();
         self.reload_gbs();
-        let Ok(guard) = self.shared.lock() else {
-            logger::error("State file lock unavailable; keeping current settings view");
+        let Ok(guard) = self.shared.try_lock() else {
+            logger::error("A worker holds the state; retry reverting once it finishes");
             return;
         };
         self.settings_edits = SettingsEdits {
@@ -1288,8 +1296,8 @@ impl RuststrapApp {
     }
 
     fn save_settings_edits(&mut self) {
-        let Ok(mut guard) = self.shared.lock() else {
-            logger::error("State file lock unavailable; settings not saved");
+        let Ok(mut guard) = self.shared.try_lock() else {
+            logger::error("A worker holds the state; retry saving once it finishes");
             return;
         };
         let player_channel = self
