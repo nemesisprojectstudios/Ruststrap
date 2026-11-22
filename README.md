@@ -72,7 +72,7 @@ src/
   ui.rs            egui window (Home / Fast Flags / Settings / About)
 ```
 
-Dependencies beyond the CLI set: `eframe`/`egui` (glow renderer, no wgpu) for the window, and `rfd` (portal backend on Linux, native dialogs on Windows) for file pickers.
+Dependencies beyond the CLI set: `eframe`/`egui` (glow renderer, no wgpu) for the window, `rfd` (portal backend on Linux, native dialogs on Windows) for file pickers, and `mimalloc` as the global allocator to keep the egui allocation churn out of resident memory.
 
 ## Building
 

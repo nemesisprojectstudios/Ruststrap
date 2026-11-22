@@ -1,6 +1,6 @@
 [package]
 name = "ruststrap"
-version = "0.1.29"
+version = "0.2.0"
 edition = "2021"
 description = "A native Rust rewrite of Froststrap, a cross-platform Roblox bootstrapper"
 license = "MPL-2.0"
@@ -14,12 +14,13 @@ md-5 = "0.11"
 zip = { version = "9", default-features = false, features = ["deflate", "deflate64"] }
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal", "pollster"] }
+mimalloc = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true

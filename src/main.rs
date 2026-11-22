@@ -10,6 +10,11 @@
 //! Headless when invoked with arguments (protocol handlers, CLI); opens its GUI
 //! window when started without arguments or with --ui.
 
+// mimalloc keeps the egui per-frame allocation churn from inflating resident
+// memory the way glibc/UCRT arenas do
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod appstorage;
 mod bootstrapper;
 mod cleaner;
