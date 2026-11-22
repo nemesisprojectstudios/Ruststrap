@@ -30,15 +30,41 @@ pub fn launch(
         verify_core_files(version_dir, is_studio);
         let mut command = std::process::Command::new(&exe);
         command.current_dir(version_dir);
-        command.stdout(std::process::Stdio::null());
-        command.stderr(std::process::Stdio::null());
         if !launch_args.is_empty() {
             command.arg(launch_args);
+            logger::info(&format!("Launch arguments: {launch_args}"));
         } else if !is_studio {
-            // the stock desktop shortcut launches the home screen the same way;
-            // a bare zero-argument launch exits instantly with code 1
+            // the stock desktop shortcut launches the home screen the same way
             command.arg("--app");
             logger::info("No launch arguments: opening the Roblox home screen (--app)");
+        }
+        // keep the client's own stdout/stderr instead of discarding them: any
+        // pre-log CRT/loader output lands in this file for diagnostic dumps
+        let stdio_path = paths.logs.join("client-stdio.log");
+        match std::fs::File::create(&stdio_path) {
+            Ok(file) => match file.try_clone() {
+                Ok(dup) => {
+                    logger::info(&format!(
+                        "Capturing client stdio to {}",
+                        stdio_path.display()
+                    ));
+                    command.stdout(file);
+                    command.stderr(dup);
+                }
+                Err(e) => {
+                    logger::warn(&format!("Cannot share stdio file handle: {e}"));
+                    command.stdout(std::process::Stdio::null());
+                    command.stderr(std::process::Stdio::null());
+                }
+            },
+            Err(e) => {
+                logger::warn(&format!(
+                    "Cannot create {}: {e}; client stdio will be discarded",
+                    stdio_path.display()
+                ));
+                command.stdout(std::process::Stdio::null());
+                command.stderr(std::process::Stdio::null());
+            }
         }
         match command.spawn() {
             Ok(mut child) => {
@@ -60,7 +86,9 @@ pub fn launch(
                                     "Another Roblox client process is running; the new client likely handed its session over to it",
                                 );
                             }
+                            harvest_client_stdio(paths);
                             harvest_client_logs(paths, is_studio, spawn_time);
+                            harvest_event_log();
                             return Ok(None);
                         }
                         Ok(None) if Instant::now() < deadline => {
@@ -196,6 +224,63 @@ fn verify_core_files(version_dir: &Path, is_studio: bool) {
             Ok(_) => logger::error(&format!("{name} is empty - the install is broken; force a reinstall from the Versions tile")),
             Err(_) => logger::error(&format!("{name} is missing from {} - the install is incomplete; force a reinstall from the Versions tile", version_dir.display())),
         }
+    }
+}
+
+/// Dumps whatever the client wrote to its captured stdout/stderr. A client
+/// that dies before logging init may still leave CRT/loader output there.
+fn harvest_client_stdio(paths: &Paths) {
+    let path = paths.logs.join("client-stdio.log");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        logger::info("Client stdio capture is empty: the client printed nothing before exiting");
+        return;
+    }
+    logger::error(&format!(
+        "--- captured client stdio ({}) ---",
+        path.display()
+    ));
+    for line in text.lines() {
+        logger::error(&format!("[Roblox stdout] {line}"));
+    }
+    logger::error("--- end of client stdio ---");
+}
+
+/// Last few Application event-log error records; anything mentioning the
+/// Roblox client is logged. Catches WER/EventLog evidence even when the
+/// client leaves no log of its own.
+fn harvest_event_log() {
+    let Ok(output) = std::process::Command::new("wevtutil")
+        .args([
+            "qe",
+            "Application",
+            "/q:*[System[(EventID=1000 or EventID=1001 or EventID=1002)]]",
+            "/c:5",
+            "/rd:true",
+            "/f:text",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        logger::warn("Could not query the Application event log (wevtutil)");
+        return;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let relevant: Vec<&str> = text
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains("roblox"))
+        .collect();
+    if relevant.is_empty() {
+        logger::info("No Roblox-related error records in the Application event log");
+        return;
+    }
+    logger::error("--- Application event log records mentioning Roblox ---");
+    for line in relevant.iter().take(40) {
+        logger::error(&format!("[EventLog] {line}"));
     }
 }
 
