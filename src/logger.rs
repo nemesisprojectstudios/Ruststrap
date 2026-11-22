@@ -14,6 +14,9 @@ use std::sync::OnceLock;
 static LOG_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 static RING: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// The last (level, line) written; identical consecutive entries are dropped
+/// so polling wait loops cannot flood the log.
+static LAST_LINE: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 const RING_CAP: usize = 400;
 
 /// Sessions older than this get a fresh log file instead of appending.
@@ -151,7 +154,18 @@ pub fn error(msg: &str) {
 }
 
 pub fn log(level: &str, msg: &str) {
+    let mut last = LAST_LINE.get_or_init(|| Mutex::new(None)).lock().ok();
     for line in msg.lines() {
+        // a repeat of the previous entry (timestamps excluded) is suppressed
+        if last
+            .as_deref()
+            .is_some_and(|prev| prev.as_ref() == Some(&(level.to_string(), line.to_string())))
+        {
+            continue;
+        }
+        if let Some(prev) = last.as_deref_mut() {
+            *prev = Some((level.to_string(), line.to_string()));
+        }
         let out = format!("[{}] [{}] {}", timestamp(), level, line);
         let _ = writeln!(std::io::stderr(), "{}", out);
         if let Some(mut guard) = LOG_FILE.get().and_then(|m| m.lock().ok()) {
@@ -287,5 +301,20 @@ mod tests {
 
     fn logger_init_for_test(dir: PathBuf) {
         init(dir);
+    }
+
+    #[test]
+    fn consecutive_duplicate_lines_are_written_once() {
+        let dir = temp_dir("dedup");
+        init(dir);
+        let before = recent().len();
+        log("INFO", "dedupe-probe");
+        log("INFO", "dedupe-probe");
+        log("INFO", "dedupe-probe");
+        assert_eq!(recent().len(), before + 1);
+        log("INFO", "dedupe-probe-2");
+        assert_eq!(recent().len(), before + 2);
+        log("INFO", "dedupe-probe");
+        assert_eq!(recent().len(), before + 3);
     }
 }
