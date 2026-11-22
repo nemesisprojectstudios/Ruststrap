@@ -540,7 +540,6 @@ impl RuststrapApp {
                     "https://api.github.com/repos/nemesisprojectstudios/Ruststrap/releases/latest",
                 )
                 .ok()
-                .and_then(|r| r.ok())
                 .and_then(|v| {
                     v.get("tag_name")
                         .and_then(|t| t.as_str())

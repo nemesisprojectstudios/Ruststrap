@@ -92,14 +92,10 @@ pub fn get_user_channel(http: &Http, settings: &Settings, binary_type: &str) -> 
         settings.roblox_domain
     );
     match http.get_json_checked::<serde_json::Value>(&url) {
-        Ok(Ok(value)) => value
+        Ok(value) => value
             .get("channelName")
             .and_then(|c| c.as_str())
             .map(|c| c.to_string()),
-        Ok(Err(parse_err)) => {
-            logger::warn(&format!("Malformed user-channel response: {parse_err}"));
-            None
-        }
         Err((_, e)) => {
             logger::warn(&format!("Failed to get user channel: {e}"));
             None
@@ -123,14 +119,7 @@ pub fn get_client_version(
     for cdn in [true, false] {
         let url = clientsettings_url(&settings.roblox_domain, binary_type, channel, cdn);
         match http.get_json_checked::<ClientVersion>(&url) {
-            Ok(Ok(info)) => return Ok(info),
-            Ok(Err(parse_err)) => {
-                if cdn {
-                    logger::warn(&format!("Malformed response from clientsettingscdn ({parse_err}), falling back to clientsettings"));
-                } else {
-                    return Err(ChannelError::Network(parse_err));
-                }
-            }
+            Ok(info) => return Ok(info),
             Err((status, e)) => {
                 if let Some(code) = status {
                     if !is_default && matches!(code, 401 | 403 | 404) {
@@ -184,6 +173,14 @@ mod tests {
             None
         );
         assert_eq!(channel_from_launch_args(""), None);
+    }
+
+    #[test]
+    fn client_version_parses_plain_response() {
+        let body = "{\"version\":\"0.748.0.7481526\",\"clientVersionUpload\":\"version-2c6fd5e09aaf4cfa\",\"bootstrapperVersion\":\"\"}";
+        let info: ClientVersion = serde_json::from_str(body).unwrap();
+        assert_eq!(info.version, "0.748.0.7481526");
+        assert_eq!(info.version_guid, "version-2c6fd5e09aaf4cfa");
     }
 
     #[test]

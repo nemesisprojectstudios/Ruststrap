@@ -40,13 +40,13 @@ impl Http {
         Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 
-    /// HTTP errors and JSON parse errors are kept apart: the outer error carries
-    /// the HTTP status (None for network failures) so callers can react to
-    /// private/missing channels.
+    /// GETs a JSON object. HTTP errors and JSON parse errors are kept apart:
+    /// the error carries the HTTP status (None for network/parse failures) so
+    /// callers can react to private/missing channels.
     pub fn get_json_checked<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
-    ) -> Result<Result<T, String>, (Option<u16>, String)> {
+    ) -> Result<T, (Option<u16>, String)> {
         let resp = self
             .agent
             .get(url)
