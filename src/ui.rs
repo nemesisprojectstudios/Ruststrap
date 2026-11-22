@@ -44,6 +44,7 @@ enum WorkerMsg {
         player: Option<String>,
         studio: Option<String>,
     },
+    ChannelProbes(Vec<(&'static str, Option<String>)>),
     FilePicked(FilePickTarget, Option<std::path::PathBuf>),
 }
 
@@ -52,12 +53,24 @@ enum FilePickTarget {
     FlagsImport,
     RobloxImport,
     RobloxExport,
+    BootstrapperRoot,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum AddTab {
     Single,
     Json,
+}
+
+/// Bootstrappers whose configuration Ruststrap can import.
+#[derive(Clone, Copy, PartialEq)]
+enum ImportSource {
+    Froststrap,
+    #[cfg(windows)]
+    Bloxstrap,
+    #[cfg(windows)]
+    Fishstrap,
+    Browse,
 }
 
 type SharedCtx = Arc<Mutex<Ctx>>;
@@ -91,7 +104,9 @@ pub fn run(ctx: Ctx) {
                 // scrolled tile content; tiles need clean clip edges instead.
                 style.spacing.scroll.fade.strength = 0.0;
             });
-            Ok(Box::new(RuststrapApp::new(ctx)))
+            let mut app = RuststrapApp::new(ctx);
+            app.refresh_profiles();
+            Ok(Box::new(app))
         }),
     );
     if let Err(e) = result {
@@ -144,6 +159,13 @@ struct RuststrapApp {
     rename_buf: String,
     sober_installed: bool,
     sober_toggles: Vec<(&'static str, &'static str, bool)>,
+    flag_profiles: Vec<String>,
+    profile_sel: String,
+    profile_name: String,
+    channel_status: Option<Vec<(&'static str, Option<String>)>>,
+    import_dialog_open: bool,
+    import_source: usize,
+    import_summary: Option<String>,
 }
 
 /// Sober's own options (Froststrap's SoberSettingsManager preset keys).
@@ -164,7 +186,16 @@ const SOBER_TOGGLES: [(&str, &str); 10] = [
 ];
 
 /// Roblox's public deployment channels (Froststrap's channel picker list).
-const KNOWN_CHANNELS: [&str; 5] = ["production", "zlive", "znext", "zcanary", "zflag"];
+/// Roblox has no public channel-list endpoint, so this fixed list is probed
+/// live instead.
+const KNOWN_CHANNELS: [&str; 6] = [
+    "production",
+    "zlive",
+    "znext",
+    "zintegration",
+    "zcanary",
+    "zflag",
+];
 
 #[derive(Default)]
 struct SettingsEdits {
@@ -175,6 +206,10 @@ struct SettingsEdits {
     max_threads: usize,
     update_roblox: bool,
     background_app: bool,
+    auto_rejoin: bool,
+    roblox_domain: String,
+    static_directory: bool,
+    theme: String,
 }
 
 /// Typed view of the UserGameSettings values we expose, mirroring
@@ -295,6 +330,10 @@ impl RuststrapApp {
             max_threads: ctx.settings.max_thread_download,
             update_roblox: ctx.settings.update_roblox,
             background_app: ctx.settings.background_app,
+            auto_rejoin: ctx.settings.auto_rejoin,
+            roblox_domain: ctx.settings.roblox_domain.clone(),
+            static_directory: ctx.settings.static_directory,
+            theme: ctx.settings.theme.clone(),
         };
         RuststrapApp {
             shared: Arc::new(Mutex::new(ctx)),
@@ -339,6 +378,13 @@ impl RuststrapApp {
             rename_buf: String::new(),
             sober_installed: !cfg!(windows) && sober::is_installed(),
             sober_toggles,
+            flag_profiles: Vec::new(),
+            profile_sel: String::new(),
+            profile_name: String::new(),
+            channel_status: None,
+            import_dialog_open: false,
+            import_source: 0,
+            import_summary: None,
         }
     }
 
@@ -408,6 +454,24 @@ impl RuststrapApp {
         });
     }
 
+    /// Directory-picker variant of the off-thread rfd flow.
+    fn open_dir_dialog(&mut self, target: FilePickTarget, title: &'static str) {
+        if self.picking.is_some() {
+            return;
+        }
+        self.picking = Some(target);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let picked =
+                std::panic::catch_unwind(|| rfd::FileDialog::new().set_title(title).pick_folder());
+            let picked = picked.unwrap_or_else(|_| {
+                logger::error("Folder dialog crashed");
+                None
+            });
+            let _ = tx.send(WorkerMsg::FilePicked(target, picked));
+        });
+    }
+
     fn handle_file_pick(&mut self, target: FilePickTarget, file: Option<std::path::PathBuf>) {
         let Some(file) = file else {
             logger::info("File dialog cancelled");
@@ -438,6 +502,13 @@ impl RuststrapApp {
                 Ok(()) => self.reload_gbs(),
                 Err(e) => logger::error(&format!("Failed to import Roblox settings: {e}")),
             },
+            FilePickTarget::BootstrapperRoot => {
+                self.import_dialog_open = true;
+                self.import_summary = Some(match self.import_from_bootstrapper(&file) {
+                    Ok(summary) => summary,
+                    Err(e) => format!("Import failed: {e}"),
+                });
+            }
             FilePickTarget::RobloxExport => {
                 let doc = gbs::Gbs {
                     raw: self.gbs.raw.clone(),
@@ -611,6 +682,45 @@ impl RuststrapApp {
             let _ = tx.send(WorkerMsg::UserChannels { player, studio });
         });
     }
+
+    /// Probes every known channel for live deployment info. Roblox has no
+    /// public channel-list endpoint, so availability = a version answers.
+    fn probe_channels_job(&mut self) {
+        self.spawn_job("Probing channels", move |shared, tx| {
+            let http = Http::new();
+            let domain = shared
+                .lock()
+                .ok()
+                .map(|guard| guard.settings.roblox_domain.clone())
+                .filter(|domain| !domain.trim().is_empty())
+                .unwrap_or_else(|| crate::paths::ROBLOX_DOMAIN.to_string());
+            let settings = crate::state::Settings {
+                roblox_domain: domain,
+                ..Default::default()
+            };
+            let mut probes: Vec<(&'static str, Option<String>)> = Vec::new();
+            for channel in KNOWN_CHANNELS {
+                match crate::deployment::get_client_version(
+                    &http,
+                    &settings,
+                    channel,
+                    crate::packages::binary_type(false),
+                ) {
+                    Ok(info) => probes.push((channel, Some(info.version))),
+                    Err(_) => probes.push((channel, None)),
+                }
+            }
+            let _ = tx.send(WorkerMsg::ChannelProbes(probes));
+        });
+    }
+
+    fn refresh_profiles(&mut self) {
+        self.flag_profiles = fastflags::list_profiles(paths::get());
+        if !self.profile_sel.is_empty() && !self.flag_profiles.contains(&self.profile_sel.clone())
+        {
+            self.profile_sel.clear();
+        }
+    }
 }
 
 impl eframe::App for RuststrapApp {
@@ -633,6 +743,7 @@ impl eframe::App for RuststrapApp {
                     self.user_channel_player = player;
                     self.user_channel_studio = studio;
                 }
+                WorkerMsg::ChannelProbes(probes) => self.channel_status = Some(probes),
                 WorkerMsg::FilePicked(target, file) => {
                     self.picking = None;
                     self.handle_file_pick(target, file);
@@ -906,6 +1017,33 @@ impl RuststrapApp {
             serde_json::to_string_pretty(&Value::Object(self.fflags.clone())).unwrap_or_default();
 
         ui.horizontal_wrapped(|ui| {
+            let mut disable_captures = self
+                .fflags
+                .get(fastflags::CAPTURE_DISABLE_FLAG)
+                .and_then(Value::as_str)
+                .map(|value| value.eq_ignore_ascii_case("false"))
+                .unwrap_or(false);
+            if ui
+                .checkbox(
+                    &mut disable_captures,
+                    "Disable screenshots & video (best-effort)",
+                )
+                .changed()
+            {
+                if disable_captures {
+                    self.fflags.insert(
+                        fastflags::CAPTURE_DISABLE_FLAG.to_string(),
+                        Value::String("False".to_string()),
+                    );
+                    logger::info(
+                        "Capture hotkey flag added (best-effort: not on Roblox's current allowlist)",
+                    );
+                } else {
+                    self.fflags.remove(fastflags::CAPTURE_DISABLE_FLAG);
+                    logger::info("Capture hotkey flag removed");
+                }
+                self.flag_dirty = true;
+            }
             if ui
                 .add_sized(BUTTON_SIZE, egui::Button::new("Add flag..."))
                 .clicked()
@@ -957,6 +1095,24 @@ impl RuststrapApp {
             {
                 ui.ctx().copy_text(json.clone());
                 logger::info("Fast flags JSON copied to clipboard");
+            }
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Clean non-allowlisted"))
+                .clicked()
+            {
+                let before = self.fflags.len();
+                self.fflags.retain(|key, _| fastflags::is_allowlisted(key));
+                self.flag_edits
+                    .retain(|key, _| self.fflags.contains_key(key));
+                self.flag_selected
+                    .retain(|key| self.fflags.contains_key(key));
+                let removed = before.saturating_sub(self.fflags.len());
+                if removed > 0 {
+                    self.flag_dirty = true;
+                }
+                logger::info(&format!(
+                    "Removed {removed} flags outside Roblox's allowlist"
+                ));
             }
             if ui
                 .add_sized(BUTTON_SIZE, egui::Button::new("Import JSON"))
@@ -1014,6 +1170,97 @@ impl RuststrapApp {
                 .hint_text("Search")
                 .desired_width(160.0),
         );
+
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Profiles:");
+            let profiles = self.flag_profiles.clone();
+            let selected = if self.profile_sel.is_empty() {
+                "Select…".to_string()
+            } else {
+                self.profile_sel.clone()
+            };
+            egui::ComboBox::from_id_salt("flag-profile")
+                .selected_text(selected)
+                .width(170.0)
+                .show_ui(ui, |ui| {
+                    if profiles.is_empty() {
+                        ui.weak("No profiles saved");
+                    }
+                    for name in profiles {
+                        ui.selectable_value(&mut self.profile_sel, name.clone(), name);
+                    }
+                });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.profile_name)
+                    .hint_text("Profile name")
+                    .desired_width(140.0),
+            );
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Save profile"))
+                .clicked()
+            {
+                let mut name = self.profile_name.trim().to_string();
+                if name.is_empty() {
+                    name = self.profile_sel.trim().to_string();
+                }
+                for (key, edit) in &self.flag_edits {
+                    self.fflags
+                        .insert(key.clone(), Value::String(edit.clone()));
+                }
+                self.flag_edits.clear();
+                match fastflags::save_profile(paths::get(), &name, &self.fflags) {
+                    Ok(stored) => {
+                        logger::info(&format!("Saved flag profile '{stored}'"));
+                        self.profile_sel = stored;
+                        self.profile_name.clear();
+                        self.refresh_profiles();
+                    }
+                    Err(e) => logger::error(&format!("Failed to save profile: {e}")),
+                }
+            }
+            let loaded = !self.profile_sel.is_empty();
+            if ui
+                .add_enabled(
+                    loaded,
+                    egui::Button::new("Load profile").min_size(BUTTON_SIZE.into()),
+                )
+                .clicked()
+            {
+                match fastflags::load_profile(paths::get(), &self.profile_sel) {
+                    Ok(flags) => {
+                        self.fflags = flags;
+                        self.flag_edits.clear();
+                        self.flag_selected.clear();
+                        self.flag_dirty = true;
+                        logger::info(&format!(
+                            "Loaded flag profile '{}' (press Save all to apply)",
+                            self.profile_sel
+                        ));
+                    }
+                    Err(e) => logger::error(&format!("Failed to load profile: {e}")),
+                }
+            }
+            if ui
+                .add_enabled(
+                    loaded,
+                    egui::Button::new("Delete profile").min_size(BUTTON_SIZE.into()),
+                )
+                .clicked()
+            {
+                match fastflags::delete_profile(paths::get(), &self.profile_sel) {
+                    Ok(()) => {
+                        logger::info(&format!(
+                            "Deleted flag profile '{}'",
+                            self.profile_sel
+                        ));
+                        self.profile_sel.clear();
+                        self.refresh_profiles();
+                    }
+                    Err(e) => logger::error(&format!("Failed to delete profile: {e}")),
+                }
+            }
+        });
 
         let query = self.flag_search.trim().to_lowercase();
         let rows: Vec<(String, String)> = self
@@ -1088,15 +1335,29 @@ impl RuststrapApp {
                         ui.scope_id().with(("fflag-row", &key)),
                         egui::Sense::click(),
                     );
+                    let allowlisted = fastflags::is_allowlisted(&key);
+                    let click = if allowlisted {
+                        click
+                    } else {
+                        click.on_hover_text(
+                            "Not in Roblox's allowlist (September 2025); the client may ignore it",
+                        )
+                    };
                     painter.text(
                         name_rect.left_center(),
                         egui::Align2::LEFT_CENTER,
-                        &key,
+                        &if allowlisted {
+                            key.clone()
+                        } else {
+                            format!("⚠ {key}")
+                        },
                         font.clone(),
                         if selected {
                             ui.visuals().strong_text_color()
-                        } else {
+                        } else if allowlisted {
                             ui.visuals().text_color()
+                        } else {
+                            ui.visuals().warn_fg_color
                         },
                     );
                     if click.double_clicked() {
@@ -1213,6 +1474,14 @@ impl RuststrapApp {
                         logger::info("Flag added");
                     }
                 }
+                if !self.dialog_name.trim().is_empty()
+                    && !fastflags::is_allowlisted(self.dialog_name.trim())
+                {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "Not in Roblox's allowlist (September 2025); the client may ignore it.",
+                    );
+                }
             }
             AddTab::Json => {
                 ui.add_sized(
@@ -1266,6 +1535,241 @@ impl RuststrapApp {
         }
     }
 
+    /// Source picker for importing another bootstrapper's configuration.
+    fn import_dialog(&mut self, ui: &mut egui::Ui) {
+        let mut sources: Vec<(&'static str, ImportSource)> =
+            vec![("Froststrap", ImportSource::Froststrap)];
+        #[cfg(windows)]
+        {
+            sources.push(("Bloxstrap", ImportSource::Bloxstrap));
+            sources.push(("Fishstrap", ImportSource::Fishstrap));
+        }
+        sources.push(("Browse for a folder…", ImportSource::Browse));
+
+        ui.label(
+            "Imports FastFlags (all bootstrappers) and, from Froststrap, its \
+             settings and saved flag profiles. Nothing is written until you press Save all.",
+        );
+        ui.add_space(4.0);
+        if self.import_source >= sources.len() {
+            self.import_source = 0;
+        }
+        for (index, (label, _)) in sources.iter().enumerate() {
+            ui.radio_value(&mut self.import_source, index, *label);
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Import"))
+                .clicked()
+            {
+                let source = sources[self.import_source].1;
+                let label = sources[self.import_source].0;
+                match source {
+                    ImportSource::Browse => {
+                        self.open_dir_dialog(
+                            FilePickTarget::BootstrapperRoot,
+                            "Locate the bootstrapper's data folder",
+                        );
+                    }
+                    kind => match Self::bootstrapper_root(kind) {
+                        Some(root) => {
+                            self.import_summary = Some(match self.import_from_bootstrapper(&root)
+                            {
+                                Ok(summary) => summary,
+                                Err(e) => format!("Import failed: {e}"),
+                            });
+                        }
+                        None => {
+                            self.import_summary = Some(format!(
+                                "Could not find the {label} data folder; is it installed?"
+                            ));
+                        }
+                    },
+                }
+            }
+            if ui
+                .add_sized(BUTTON_SIZE, egui::Button::new("Close"))
+                .clicked()
+            {
+                self.import_dialog_open = false;
+            }
+        });
+        if let Some(summary) = &self.import_summary {
+            ui.add_space(4.0);
+            ui.label(summary);
+        }
+    }
+
+    /// Default data-folder location of the given bootstrapper.
+    fn bootstrapper_root(kind: ImportSource) -> Option<std::path::PathBuf> {
+        match kind {
+            ImportSource::Froststrap => {
+                let base = if cfg!(windows) {
+                    std::env::var_os("APPDATA").map(std::path::PathBuf::from)
+                } else {
+                    Some(paths::home_dir().join(".config"))
+                };
+                base.map(|base| base.join("Froststrap"))
+            }
+            #[cfg(windows)]
+            ImportSource::Bloxstrap | ImportSource::Fishstrap => {
+                let name = match kind {
+                    ImportSource::Bloxstrap => "Bloxstrap",
+                    ImportSource::Fishstrap => "Fishstrap",
+                    _ => return None,
+                };
+                std::env::var_os("LOCALAPPDATA")
+                    .map(std::path::PathBuf::from)
+                    .map(|base| base.join(name))
+            }
+            _ => None,
+        }
+    }
+
+    /// Imports FastFlags (and, from Froststrap, settings plus saved flag
+    /// profiles) from another bootstrapper's data folder into the edit
+    /// caches. Nothing is persisted until the user saves.
+    fn import_from_bootstrapper(&mut self, root: &std::path::Path) -> Result<String, String> {
+        let mut flags_imported = 0usize;
+        for path in [
+            root.join("Modifications/clientsettings/ClientAppSettings.json"),
+            root.join("Modifications/ClientSettings/ClientAppSettings.json"),
+        ] {
+            if self.try_import_flag_file(&path, &mut flags_imported) {
+                break;
+            }
+        }
+
+        let mut settings_imported = false;
+        let settings_path = root.join("Settings.json");
+        if settings_path.is_file() {
+            match std::fs::read_to_string(&settings_path) {
+                Ok(text) => match serde_json::from_str::<Value>(&text) {
+                    Ok(Value::Object(obj)) => {
+                        self.apply_froststrap_settings(&obj);
+                        settings_imported = true;
+                    }
+                    _ => logger::warn("Froststrap Settings.json is not a JSON object; skipped"),
+                },
+                Err(e) => logger::warn(&format!("Could not read Froststrap Settings.json: {e}")),
+            }
+        }
+
+        let mut profiles_imported = 0usize;
+        let profiles_dir = root.join("SavedFlagProfiles");
+        if profiles_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    if let Some((map, _)) = parse_flags_json(&text) {
+                        match fastflags::save_profile(paths::get(), &name, &map) {
+                            Ok(_stored) => profiles_imported += 1,
+                            Err(e) => logger::warn(&format!("Skipped profile {name}: {e}")),
+                        }
+                    }
+                }
+            }
+            self.refresh_profiles();
+        }
+
+        if flags_imported == 0 && !settings_imported && profiles_imported == 0 {
+            return Err(format!("nothing importable found in {}", root.display()));
+        }
+        self.flag_edits.clear();
+        if flags_imported > 0 {
+            self.flag_dirty = true;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if flags_imported > 0 {
+            parts.push(format!("{flags_imported} flags"));
+        }
+        if settings_imported {
+            parts.push("settings".to_string());
+        }
+        if profiles_imported > 0 {
+            parts.push(format!("{profiles_imported} flag profiles"));
+        }
+        Ok(format!(
+            "Imported {} from {} (press Save all to apply)",
+            parts.join(", "),
+            root.display()
+        ))
+    }
+
+    /// Merges a foreign flags JSON file into the current flag map.
+    fn try_import_flag_file(&mut self, path: &std::path::Path, count: &mut usize) -> bool {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let Some((map, imported)) = parse_flags_json(&text) else {
+            return false;
+        };
+        for (key, value) in map {
+            self.fflags
+                .insert(key, Value::String(fastflags::flag_value_to_string(&value)));
+        }
+        *count = imported;
+        true
+    }
+
+    /// Maps Froststrap's Settings.json onto the settings edit cache.
+    fn apply_froststrap_settings(&mut self, obj: &serde_json::Map<String, Value>) {
+        let read_str = |key: &str| {
+            obj.get(key)
+                .and_then(Value::as_str)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let read_bool = |key: &str| obj.get(key).and_then(Value::as_bool);
+        let edits = &mut self.settings_edits;
+        if let Some(value) = read_str("PlayerChannel") {
+            edits.player_channel = value.to_ascii_lowercase();
+        }
+        if let Some(value) = read_str("StudioChannel") {
+            edits.studio_channel = value.to_ascii_lowercase();
+        }
+        if let Some(value) = read_str("RobloxDomain") {
+            edits.roblox_domain = value;
+        }
+        if let Some(value) = read_str("RobloxTheme") {
+            edits.theme = value.to_ascii_lowercase();
+        }
+        if let Some(value) = read_str("ChannelChangeMode") {
+            edits.channel_change_mode = value.to_ascii_lowercase();
+        }
+        if let Some(value) = obj.get("MaxThreadDownload").and_then(Value::as_u64) {
+            edits.max_threads = value.clamp(1, 32) as usize;
+        }
+        if let Some(value) = read_bool("UpdateRoblox") {
+            edits.update_roblox = value;
+        }
+        if let Some(value) = read_bool("StaticDirectory") {
+            edits.static_directory = value;
+        }
+        if let Some(value) = read_bool("EnableRobloxBackgroundApp") {
+            edits.background_app = value;
+        }
+        if let Some(value) = read_str("CleanerOptions") {
+            match value.as_str() {
+                "Never" => edits.cleaner_days = 0,
+                "OneDay" => edits.cleaner_days = 1,
+                "OneWeek" => edits.cleaner_days = 7,
+                "OneMonth" => edits.cleaner_days = 30,
+                "TwoMonths" => edits.cleaner_days = 60,
+                _ => {}
+            }
+        }
+        self.settings_dirty = true;
+    }
+
     /// Apply the live edits to the map and persist them to
     /// ClientAppSettings.json (Windows) or Sober's config.json (Linux).
     /// Enforces the in-memory caches (fast flags, Roblox settings, Sober
@@ -1298,6 +1802,10 @@ impl RuststrapApp {
             max_threads: guard.settings.max_thread_download,
             update_roblox: guard.settings.update_roblox,
             background_app: guard.settings.background_app,
+            auto_rejoin: guard.settings.auto_rejoin,
+            roblox_domain: guard.settings.roblox_domain.clone(),
+            static_directory: guard.settings.static_directory,
+            theme: guard.settings.theme.clone(),
         };
         drop(guard);
         self.settings_dirty = false;
@@ -1335,8 +1843,16 @@ impl RuststrapApp {
         guard.settings.channel_change_mode = mode.to_string();
         guard.settings.update_roblox = self.settings_edits.update_roblox;
         guard.settings.background_app = self.settings_edits.background_app;
+        guard.settings.auto_rejoin = self.settings_edits.auto_rejoin;
         guard.settings.max_thread_download = self.settings_edits.max_threads;
         guard.settings.cleaner_days = self.settings_edits.cleaner_days;
+        if !self.settings_edits.roblox_domain.trim().is_empty() {
+            guard.settings.roblox_domain = self.settings_edits.roblox_domain.trim().to_string();
+        }
+        guard.settings.static_directory = self.settings_edits.static_directory;
+        if !self.settings_edits.theme.trim().is_empty() {
+            guard.settings.theme = self.settings_edits.theme.trim().to_string();
+        }
         guard.save_settings();
         drop(guard);
         #[cfg(not(windows))]
@@ -1910,6 +2426,24 @@ impl RuststrapApp {
                             _ => {}
                         }
                         ui.label(format!("Default: {DEFAULT_CHANNEL}"));
+                        if ui.button("Show available channels").clicked() {
+                            g.probe_channels_job();
+                        }
+                        if let Some(probes) = &g.channel_status {
+                            for (channel, version) in probes {
+                                match version {
+                                    Some(version) => {
+                                        ui.label(format!("{channel}: {version}"));
+                                    }
+                                    None => {
+                                        ui.colored_label(
+                                            ui.visuals().warn_fg_color,
+                                            format!("{channel}: unavailable"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }),
                 ),
                 (
@@ -1950,6 +2484,12 @@ impl RuststrapApp {
                                 "Keep Roblox running in the background when closed",
                             )
                             .changed();
+                        g.settings_dirty |= ui
+                            .checkbox(
+                                &mut g.settings_edits.auto_rejoin,
+                                "Auto-rejoin after a disconnect",
+                            )
+                            .changed();
                         ui.horizontal(|ui| {
                             ui.label("Parallel downloads");
                             g.settings_dirty |= ui
@@ -1978,7 +2518,27 @@ impl RuststrapApp {
             {
                 self.save_settings_edits();
             }
+            if ui
+                .add_sized(
+                    BUTTON_SIZE,
+                    egui::Button::new("Import from another bootstrapper…"),
+                )
+                .clicked()
+            {
+                self.import_summary = None;
+                self.import_dialog_open = true;
+            }
         });
+
+        if self.import_dialog_open {
+            let mut open = self.import_dialog_open;
+            egui::Window::new("Import from another bootstrapper")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| self.import_dialog(ui));
+            self.import_dialog_open = open;
+        }
 
         if !cfg!(windows) {
             ui.add_space(16.0);

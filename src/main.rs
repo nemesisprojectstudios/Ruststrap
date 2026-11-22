@@ -33,6 +33,7 @@ mod paths;
 mod processes;
 mod progress;
 mod registry;
+mod rejoin;
 mod sober;
 mod state;
 mod stock;

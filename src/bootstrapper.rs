@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+use std::time::SystemTime;
+
 use crate::deployment::{self, ChannelError};
 use crate::http::Http;
 use crate::launch;
@@ -10,8 +12,9 @@ use crate::logger;
 use crate::packages::{self};
 use crate::paths::{self, Paths, DEFAULT_CHANNEL};
 use crate::progress;
+use crate::rejoin;
 use crate::sober;
-use crate::state::{ChannelChangeMode, Ctx};
+use crate::state::{ChannelChangeMode, Ctx, Settings};
 use crate::watcher;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,6 +83,12 @@ impl<'a> Bootstrapper<'a> {
 
         let lock = FileLock::acquire(&self.paths.data_root, "Bootstrapper");
         logger::info("Lock acquired");
+
+        // remember the joined place so a disconnected session can rejoin
+        if self.mode == LaunchMode::Player && !self.launch_args.is_empty() {
+            self.ctx.state.last_place_uri = self.launch_args.clone();
+            self.ctx.save_state();
+        }
 
         // On Linux the player's client is entirely managed by Sober: skip the
         // deployment check, version resolution, and all package machinery.
@@ -255,20 +264,81 @@ impl<'a> Bootstrapper<'a> {
         }
 
         progress::set("Launching Roblox");
+        let session_start = SystemTime::now();
         let Some(child) = launch::launch(self.paths, false, &dir, &self.launch_args)? else {
             return Ok(());
         };
+        let relaunch = move |paths: &'static Paths, uri: String| {
+            launch::launch(paths, false, &dir, &uri)?
+                .ok_or_else(|| "client did not start".to_string())
+        };
+        self.player_exit_tail(child, "RobloxPlayerBeta.exe", session_start, relaunch);
+        Ok(())
+    }
+
+    /// Shared post-launch tail of both player flows: waits for the client,
+    /// auto-rejoins on disconnect evidence, then runs the post-exit tasks.
+    /// With --no-wait the whole tail runs detached so the caller returns
+    /// immediately while the rejoin watcher keeps running.
+    fn player_exit_tail(
+        &mut self,
+        child: std::process::Child,
+        label: &'static str,
+        session_start: SystemTime,
+        relaunch: impl Fn(&'static Paths, String) -> Result<std::process::Child, String> + Send + 'static,
+    ) {
+        let paths = self.paths;
+        let auto_rejoin = self.ctx.settings.auto_rejoin;
+        let joined_uri = if self.launch_args.is_empty() {
+            self.ctx.state.last_place_uri.clone()
+        } else {
+            self.launch_args.clone()
+        };
+        let has_uri = !joined_uri.is_empty();
+        let settings: Settings = self.ctx.settings.clone();
 
         if self.no_wait {
             logger::info("--no-wait given, leaving Roblox running");
-            return Ok(());
+            if auto_rejoin && has_uri {
+                std::thread::spawn(move || {
+                    watcher::wait_for_exit(child, label);
+                    let mut since = SystemTime::now();
+                    let dirs = rejoin::client_log_dirs(paths);
+                    let mut attempt = || relaunch(paths, joined_uri.clone());
+                    rejoin::reconnect_loop(
+                        true,
+                        true,
+                        &dirs,
+                        label,
+                        &mut since,
+                        rejoin::REJOIN_DELAY,
+                        &mut attempt,
+                    );
+                    launch::apply_app_storage(paths, &settings);
+                    crate::cleaner::clean(paths, &settings);
+                });
+            }
+            return;
         }
 
         progress::set("Waiting for Roblox to exit");
-        watcher::wait_for_exit(child, "RobloxPlayerBeta.exe");
-        launch::apply_app_storage(self.paths, &self.ctx.settings);
-        crate::cleaner::clean(self.paths, &self.ctx.settings);
-        Ok(())
+        watcher::wait_for_exit(child, label);
+        if auto_rejoin && has_uri {
+            let mut since = session_start;
+            let dirs = rejoin::client_log_dirs(paths);
+            let mut attempt = || relaunch(paths, joined_uri.clone());
+            rejoin::reconnect_loop(
+                true,
+                true,
+                &dirs,
+                label,
+                &mut since,
+                rejoin::REJOIN_DELAY,
+                &mut attempt,
+            );
+        }
+        launch::apply_app_storage(paths, &settings);
+        crate::cleaner::clean(paths, &settings);
     }
 
     fn run_sober_flow(&mut self) -> Result<(), String> {
@@ -284,16 +354,10 @@ impl<'a> Bootstrapper<'a> {
             return Ok(());
         }
 
+        let session_start = SystemTime::now();
         let child = sober::launch(&self.launch_args)?;
-
-        if self.no_wait {
-            logger::info("--no-wait given, leaving Sober running");
-            return Ok(());
-        }
-
-        watcher::wait_for_exit(child, "sober");
-        launch::apply_app_storage(self.paths, &self.ctx.settings);
-        crate::cleaner::clean(self.paths, &self.ctx.settings);
+        let relaunch = |_: &'static Paths, uri: String| sober::launch(&uri);
+        self.player_exit_tail(child, "sober", session_start, relaunch);
         Ok(())
     }
 

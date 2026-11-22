@@ -22,7 +22,8 @@ pub fn clean_now(paths: &Paths, days: u32) {
     let roblox_logs = if cfg!(windows) {
         paths.roblox.join("logs")
     } else {
-        paths.roblox.join("data/sober/sober_logs")
+        // Sober's client logs live in its flatpak data directory
+        crate::sober::data_dir(paths).join("data/sober/sober_logs")
     };
     let roblox_cache = if cfg!(windows) {
         std::env::temp_dir().join("Roblox")

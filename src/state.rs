@@ -28,6 +28,8 @@ pub struct Settings {
     /// Reaction when a launch URI asks for another channel:
     /// "automatic" (switch), "prompt" (ask user), "ignore" (keep current)
     pub channel_change_mode: String,
+    /// Rejoin the last experience automatically after a client disconnect
+    pub auto_rejoin: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -60,6 +62,7 @@ impl Default for Settings {
             background_app: false,
             cleaner_days: 0,
             channel_change_mode: "automatic".to_string(),
+            auto_rejoin: false,
         }
     }
 }
@@ -69,6 +72,8 @@ impl Default for Settings {
 pub struct State {
     pub is_first_launch: bool,
     pub force_reinstall: bool,
+    /// Last place join URI, kept for the auto-rejoin feature.
+    pub last_place_uri: String,
 }
 
 impl Default for State {
@@ -76,6 +81,7 @@ impl Default for State {
         State {
             is_first_launch: true,
             force_reinstall: false,
+            last_place_uri: String::new(),
         }
     }
 }
