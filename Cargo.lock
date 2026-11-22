@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "ruststrap"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "eframe",
  "md-5",

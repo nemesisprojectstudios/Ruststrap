@@ -101,7 +101,7 @@ pub fn package_map(is_studio: bool) -> HashMap<&'static str, &'static str> {
             ("RibbonConfig.zip", "RibbonConfig"),
         ]);
     } else {
-        map.extend([("RobloxApp.zip", "")]);
+        map.extend([("RobloxApp.zip", ""), ("RobloxPlayerInstaller.exe", "")]);
     }
     map
 }

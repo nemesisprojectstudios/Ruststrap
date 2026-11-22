@@ -29,6 +29,7 @@ mod progress;
 mod registry;
 mod sober;
 mod state;
+mod stock;
 mod ui;
 mod watcher;
 

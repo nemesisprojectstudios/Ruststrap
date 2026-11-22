@@ -789,7 +789,16 @@ impl RuststrapApp {
         // block a frame on it, just fall back to empty rows until it frees up
         let (player_guid, studio_guid) = match self.shared.try_lock() {
             Ok(guard) => (
-                guard.player_state.version_guid.clone(),
+                if cfg!(windows) {
+                    crate::stock::installed_dir(crate::paths::get(), None)
+                        .and_then(|dir| {
+                            dir.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                        })
+                        .unwrap_or_default()
+                } else {
+                    guard.player_state.version_guid.clone()
+                },
                 guard.studio_state.version_guid.clone(),
             ),
             Err(_) => (String::new(), String::new()),
@@ -2113,9 +2122,17 @@ impl RuststrapApp {
                     .clicked()
             {
                 self.confirm_uninstall = false;
-                self.spawn_job("Uninstalling", |shared, _| {
+                let windows_stock = cfg!(windows);
+                let pk = paths::get();
+                self.spawn_job("Uninstalling", move |shared, _| {
                     let outcome = match shared.lock() {
-                        Ok(mut guard) => packages::uninstall(paths::get(), &mut guard),
+                        Ok(mut guard) => {
+                            if windows_stock {
+                                crate::stock::uninstall(pk)
+                            } else {
+                                packages::uninstall(pk, &mut guard)
+                            }
+                        }
                         Err(e) => Err(format!("state lock unavailable: {e}")),
                     };
                     match outcome {

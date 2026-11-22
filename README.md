@@ -36,10 +36,10 @@ ruststrap --player --force # headless reinstall + launch
 
 | | Windows | Linux |
 |---|---|---|
-| Player | `WindowsPlayer` packages, launched natively (`RobloxPlayerBeta.exe`) | [Sober](https://vinegarhq.org) via Flatpak — no packages downloaded |
+| Player | the **stock install** the official installer/WinGet maintains, launched natively (`RobloxPlayerBeta.exe`) — no packages downloaded | [Sober](https://vinegarhq.org) via Flatpak — no packages downloaded |
 | Studio | `WindowsStudio64` packages, launched natively (`RobloxStudioBeta.exe`) | `WindowsStudio64` packages run through **Wine** (system install, dedicated prefix in the data root) |
 
-- **Windows**: registers the `roblox-player:` / `roblox:` / `roblox-studio:` / `roblox-studio-auth:` protocol handlers and `.rbxl*`/`.rbxm*` file associations under `HKCU`, tracks client locations and channels in a `Ruststrap` registry key, and can re-use verified packages already stocked by the official launcher's `%LOCALAPPDATA%/Roblox/Downloads` cache (same MD5 "FastHash" scheme).
+- **Windows**: installs and updates the player through **winget** (`Roblox.Roblox`) into the stock `%LOCALAPPDATA%/Roblox` location, keeping the exact files the official launcher ships (the stock client is verified to run where Ruststrap's own package drops were rejected); registers the `roblox-player:` / `roblox:` / `roblox-studio:` / `roblox-studio-auth:` protocol handlers and `.rbxl*`/`.rbxm*` file associations under `HKCU`, tracks client locations and channels in a `Ruststrap` registry key; Studio still uses Ruststrap's own packages and can re-use verified packages stocked by the official launcher's `Downloads` cache (same MD5 "FastHash" scheme).
 - **Linux Player**: ensures Sober is installed from Flathub, maps `~/.var/app/org.vinegarhq.Sober` to Ruststrap's data root, translates `roblox-player:` URIs to `roblox://experiences/start?...`. Fast flags and Sober's own options (GameMode, HiDPI, Discord RPC, …) are read from and written to Sober's `config.json` with typed values.
 - **Linux Studio**: downloads the same Windows Studio packages, initializes a Wine prefix on first run, and launches `RobloxStudioBeta.exe` through it.
 - **Channels**: per-mode channel support, arriving via `--channel`, a `channel:` token in the launch URI, or saved settings; private/unusable channels revert to `production` automatically (HTTP 401/403/404 detection on both the CDN and non-CDN settings endpoints).
@@ -58,6 +58,7 @@ src/
   fastflags.rs     ClientAppSettings.json management
   registry.rs      Windows-only HKCU registration
   sober.rs         Linux Player (Sober) flow
+  stock.rs         Windows Player stock-install flow (winget-managed Roblox)
   launch.rs        process launching (native / Wine / Sober)
   appstorage.rs    Roblox app-storage settings (single theme)
   http.rs          HTTP + streaming MD5 verification

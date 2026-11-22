@@ -87,6 +87,12 @@ impl<'a> Bootstrapper<'a> {
             return self.run_sober_flow();
         }
 
+        // On Windows the player runs from the stock install the official
+        // installer/WinGet maintains; only Studio uses Ruststrap's packages.
+        if cfg!(windows) && !self.is_studio() {
+            return self.run_windows_stock_flow(&channel);
+        }
+
         progress::set("Fetching deployment info");
         let version = self.resolve_version(&channel)?;
         if !version.version.is_empty() {
@@ -176,6 +182,90 @@ impl<'a> Bootstrapper<'a> {
 
         progress::set("Waiting for Roblox to exit");
         watcher::wait_for_exit(child, packages::executable_name(is_studio));
+        launch::apply_app_storage(self.paths, &self.ctx.settings);
+        crate::cleaner::clean(self.paths, &self.ctx.settings);
+        Ok(())
+    }
+
+    /// Windows player: mirrors the Sober flow. Roblox is installed and
+    /// updated as the stock client (via winget), and Ruststrap only applies
+    /// its modifications, registers the protocol handlers, and launches.
+    fn run_windows_stock_flow(&mut self, channel: &str) -> Result<(), String> {
+        if self.forced_version.is_some() {
+            logger::warn("Pinned versions are not supported with the stock client; ignoring the pin");
+            self.forced_version = None;
+        }
+
+        progress::set("Fetching deployment info");
+        let version = match self.resolve_version(channel) {
+            Ok(v) => v,
+            Err(e) => {
+                // offline or backend trouble: keep serving the installed client
+                logger::warn(&format!(
+                    "Version check failed ({e}); using the installed stock client"
+                ));
+                deployment::ClientVersion {
+                    version: String::new(),
+                    version_guid: String::new(),
+                }
+            }
+        };
+        if !version.version.is_empty() {
+            logger::info(&format!(
+                "Roblox version {} ({})",
+                version.version, version.version_guid
+            ));
+        }
+
+        progress::set("Checking Roblox install");
+        let dir = crate::stock::ensure_stock_player(
+            self.paths,
+            if version.version_guid.is_empty() {
+                None
+            } else {
+                Some(&version.version_guid)
+            },
+            self.force || self.ctx.state.force_reinstall,
+        )?;
+
+        #[cfg(windows)]
+        {
+            let exe =
+                std::env::current_exe().map_err(|e| format!("cannot resolve executable: {e}"))?;
+            crate::registry::register_player(&exe);
+            crate::registry::register_client_location(false, &dir.display().to_string());
+            crate::registry::sync_channel(
+                false,
+                &self.ctx.settings.roblox_domain,
+                channel,
+                deployment::is_default_channel(channel),
+            );
+        }
+
+        progress::set("Applying modifications");
+        packages::apply_modifications(self.paths, &dir);
+        launch::apply_app_storage(self.paths, &self.ctx.settings);
+
+        self.ctx.state.is_first_launch = false;
+        self.ctx.save_state();
+
+        if self.no_launch {
+            logger::info("--no-launch given, skipping start");
+            return Ok(());
+        }
+
+        progress::set("Launching Roblox");
+        let Some(child) = launch::launch(self.paths, false, &dir, &self.launch_args)? else {
+            return Ok(());
+        };
+
+        if self.no_wait {
+            logger::info("--no-wait given, leaving Roblox running");
+            return Ok(());
+        }
+
+        progress::set("Waiting for Roblox to exit");
+        watcher::wait_for_exit(child, "RobloxPlayerBeta.exe");
         launch::apply_app_storage(self.paths, &self.ctx.settings);
         crate::cleaner::clean(self.paths, &self.ctx.settings);
         Ok(())
