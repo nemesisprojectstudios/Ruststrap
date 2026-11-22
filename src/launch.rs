@@ -26,12 +26,6 @@ pub fn launch(
     if cfg!(windows) {
         let exe = version_dir.join(crate::packages::executable_name(is_studio));
         logger::info(&format!("Starting Roblox: {}", exe.display()));
-        if !is_studio && launch_args.is_empty() {
-            logger::info(
-                "No launch arguments: the client opens to its home screen; \
-                 join a game from the website or a game shortcut to play",
-            );
-        }
         verify_version_configs(version_dir);
         verify_core_files(version_dir, is_studio);
         let mut command = std::process::Command::new(&exe);
@@ -40,6 +34,11 @@ pub fn launch(
         command.stderr(std::process::Stdio::null());
         if !launch_args.is_empty() {
             command.arg(launch_args);
+        } else if !is_studio {
+            // the stock desktop shortcut launches the home screen the same way;
+            // a bare zero-argument launch exits instantly with code 1
+            command.arg("--app");
+            logger::info("No launch arguments: opening the Roblox home screen (--app)");
         }
         match command.spawn() {
             Ok(mut child) => {
