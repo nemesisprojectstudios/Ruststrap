@@ -165,8 +165,7 @@ impl<'a> Bootstrapper<'a> {
         }
 
         progress::set("Launching Roblox");
-        let Some(mut child) = launch::launch(self.paths, is_studio, &dir, &self.launch_args)?
-        else {
+        let Some(child) = launch::launch(self.paths, is_studio, &dir, &self.launch_args)? else {
             return Ok(());
         };
 
@@ -176,7 +175,7 @@ impl<'a> Bootstrapper<'a> {
         }
 
         progress::set("Waiting for Roblox to exit");
-        watcher::wait_for_exit(&mut child);
+        watcher::wait_for_exit(child, packages::executable_name(is_studio));
         launch::apply_app_storage(self.paths, &self.ctx.settings);
         crate::cleaner::clean(self.paths, &self.ctx.settings);
         Ok(())
@@ -195,14 +194,14 @@ impl<'a> Bootstrapper<'a> {
             return Ok(());
         }
 
-        let mut child = sober::launch(&self.launch_args)?;
+        let child = sober::launch(&self.launch_args)?;
 
         if self.no_wait {
             logger::info("--no-wait given, leaving Sober running");
             return Ok(());
         }
 
-        watcher::wait_for_exit(&mut child);
+        watcher::wait_for_exit(child, "sober");
         launch::apply_app_storage(self.paths, &self.ctx.settings);
         crate::cleaner::clean(self.paths, &self.ctx.settings);
         Ok(())

@@ -30,6 +30,25 @@ pub fn kill_images(images: &[&str]) {
     }
 }
 
+/// Cheap existence check by image name; used where holding a process
+/// handle is not an option (see watcher::wait_for_exit).
+pub fn image_running(image: &str) -> bool {
+    if cfg!(windows) {
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {image}"), "/NH"])
+            .output();
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout)
+                .to_ascii_lowercase()
+                .contains(&image.to_ascii_lowercase()),
+            Err(_) => false,
+        }
+    } else {
+        // pkill exits 0 when a process matched
+        run_quiet(Command::new("pkill").args(["-0", "-x", image]))
+    }
+}
+
 pub fn roblox_player_image() -> &'static str {
     if cfg!(windows) {
         "RobloxPlayerBeta.exe"
@@ -40,4 +59,14 @@ pub fn roblox_player_image() -> &'static str {
 
 pub fn roblox_crash_handler_image() -> &'static str {
     "RobloxCrashHandler.exe"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_running_reports_absent_process() {
+        assert!(!image_running("ruststrap-not-a-real-image-name-42"));
+    }
 }

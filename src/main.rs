@@ -2,6 +2,10 @@
 //
 // SPDX-License-Identifier: MPL-2.0
 
+// release builds are pure GUI apps: launching from Explorer or a protocol
+// handler must not allocate a console window (logs only go to the log file)
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! Ruststrap: a native Rust rewrite of Froststrap, a cross-platform Roblox bootstrapper.
 //! Headless when invoked with arguments (protocol handlers, CLI); opens its GUI
 //! window when started without arguments or with --ui.

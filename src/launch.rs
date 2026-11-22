@@ -20,13 +20,30 @@ pub fn launch(
     if cfg!(windows) {
         let exe = version_dir.join(crate::packages::executable_name(is_studio));
         logger::info(&format!("Starting Roblox: {}", exe.display()));
+        if !is_studio && launch_args.is_empty() {
+            logger::info(
+                "No launch arguments: the client opens to its home screen; \
+                 join a game from the website or a game shortcut to play",
+            );
+        }
         let mut command = std::process::Command::new(&exe);
         command.current_dir(version_dir);
+        command.stdout(std::process::Stdio::null());
+        command.stderr(std::process::Stdio::null());
         if !launch_args.is_empty() {
             command.arg(launch_args);
         }
         match command.spawn() {
-            Ok(child) => Ok(Some(child)),
+            Ok(mut child) => match child.try_wait() {
+                Ok(Some(status)) => {
+                    logger::warn(&format!(
+                        "Roblox exited immediately with {status}; \
+                         check your FastFlags and the install (use force reinstall)"
+                    ));
+                    Ok(None)
+                }
+                _ => Ok(Some(child)),
+            },
             Err(e) => {
                 // a broken executable gets removed so the next run reinstalls cleanly
                 let _ = std::fs::remove_file(&exe);
